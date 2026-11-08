@@ -1,0 +1,6 @@
+.workbuddy/
+github_pat.txt
+*.pat
+.env
+node_modules/
+Thumbs.db
