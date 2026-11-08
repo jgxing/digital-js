@@ -238,6 +238,79 @@ t('全部内置示例可上电稳定', function () {
   });
 });
 
+console.log('\n[7] 总线分割规格（Digital 风格）');
+t('分割语法：宽度 / 重复 / 直选位 / 混合 / 反序', function () {
+  var r = L.parseSplit('4,2,2', { requireComplete: true });
+  eq(r.error, null); eq(r.busBits, 8);
+  eq(r.segments.map(function (s) { return s.width; }).join(','), '4,2,2');
+  eq(r.segments[1].bits.join(','), '4,5');
+  r = L.parseSplit('1*16', { requireComplete: true });
+  eq(r.busBits, 16); eq(r.segments.length, 16); eq(r.segments[15].bits[0], 15);
+  r = L.parseSplit('4-7,0-3', { requireComplete: true });
+  eq(r.busBits, 8); eq(r.segments[0].bits.join(','), '4,5,6,7');
+  r = L.parseSplit('4,2*2', { requireComplete: true });
+  eq(r.error, null); eq(r.busBits, 8);
+  r = L.parseSplit('7-4,0-3', { requireComplete: true });
+  eq(r.error, null); eq(r.segments[0].bits.join(','), '7,6,5,4');
+});
+t('输入必须完整且唯一，输出可重复引用', function () {
+  ok(/未指定/.test(L.parseSplit('4-7', { requireComplete: true }).error || ''), '遗漏未报错');
+  ok(/重复/.test(L.parseSplit('0-3,0-3', { requireComplete: true }).error || ''), '重复未报错');
+  ok(/上限|超过/.test(L.parseSplit('1*40', { requireComplete: true }).error || ''), '超 32 位未报错');
+  ok(/无法解析/.test(L.parseSplit('4,x', { requireComplete: true }).error || ''), '非法字符未报错');
+  var o = L.parseSplit('0-7,1-6,4-7', { busBits: 8 });
+  eq(o.error, null); eq(o.segments.length, 3);
+  eq(o.segments.map(function (s) { return s.width; }).join(','), '8,6,4');
+  ok(/超出/.test(L.parseSplit('0-9', { busBits: 8 }).error || ''), '输出越界未报错');
+});
+t('新分线器引脚与仿真：4,2,2 → 0-7,1-6,4-7', function () {
+  var s = L.newComponent('splitter', 20, 20, { bits: 8, inSplit: '4,2,2', outSplit: '0-7,1-6,4-7' });
+  var m = L.splitModel(s.props);
+  eq(m.error, null); eq(m.busBits, 8);
+  eq(L.pinsOf(s).map(function (p) { return p.name + ':' + p.bits; }).join(' '), 'i0:4 i1:2 i2:2 o0:8 o1:6 o2:4');
+  var e = L.get('splitter').eval({ i0: { v: 0xA, z: 0 }, i1: { v: 1, z: 0 }, i2: { v: 2, z: 0 } }, {}, s.props);
+  eq(e.o0.v, 154); eq(e.o1.v, 13); eq(e.o2.v, 9);
+});
+t('32 位总线 1*32 与乱序 / 重叠输出', function () {
+  var s = L.newComponent('splitter', 0, 0, { bits: 32, inSplit: '1*32', outSplit: '16-31,0-15' });
+  var m = L.splitModel(s.props);
+  eq(m.error, null); eq(m.busBits, 32); eq(m.inSegments.length, 32);
+  var inp = {}, k;
+  for (k = 0; k < 32; k++) inp['i' + k] = { v: k % 2, z: 0 };
+  var o = L.get('splitter').eval(inp, {}, s.props);
+  eq(o.o0.v, 0xAAAA); eq(o.o1.v, 0xAAAA);
+  var s2 = L.newComponent('splitter', 0, 0, { bits: 8, inSplit: '4-7,0-3', outSplit: '8' });
+  eq(L.get('splitter').eval({ i0: { v: 9, z: 0 }, i1: { v: 6, z: 0 } }, {}, s2.props).o0.v, 150);
+});
+t('旧版 bus/bN 电路仍兼容（32 位）', function () {
+  var s = L.newComponent('splitter', 0, 0, { bits: 32, mode: 'combine' });
+  var m = L.splitModel(s.props);
+  eq(m.legacy, true); eq(m.busBits, 32);
+  eq(L.pinsOf(s).length, 33);
+  var inp = {}, k;
+  for (k = 0; k < 32; k++) inp['b' + k] = { v: k === 31 ? 1 : 0, z: 0 };
+  eq(L.get('splitter').eval(inp, {}, s.props).bus.v >>> 0, 0x80000000);
+});
+t('新分割导出 Verilog / VHDL 逐位装配', function () {
+  var c = C(), s = add(c, 'splitter', 20, 20, { bits: 8, inSplit: '4,2,2', outSplit: '0-7,1-6,4-7' });
+  var a = add(c, 'portIn', 0, 0, { label: 'a', bits: 4 });
+  var y = add(c, 'portOut', 40, 0, { label: 'y', bits: 8 });
+  net(c, 'na', [[a, 'y'], [s, 'i0']]);
+  net(c, 'ny', [[s, 'o0'], [y, 'y']]);
+  var v = D.HDL.exportHDL(c, 'verilog'), h = D.HDL.exportHDL(c, 'vhdl');
+  ok(/wire \[7:0\] split_bus_/.test(v.code), 'Verilog 缺少内部总线');
+  ok(/assign split_bus_\w+\[0\] = a\[0\]/.test(v.code), 'Verilog 缺少逐位装配');
+  ok(/signal split_bus_/.test(h.code) && /\(0\) <= a\(0\)/.test(h.code), 'VHDL 缺少逐位装配');
+});
+t('HDL 导入展开生成合法分割规格', function () {
+  var src = 'module top(input [7:0] a, output y); assign y = a[5]; endmodule';
+  var m = D.HDL.compile(src, 'verilog'), g = D.HDL.importGates(m, src);
+  var sp = g.circuit.components.filter(function (x) { return x.type === 'splitter'; });
+  ok(sp.length >= 1, '未生成分线器');
+  sp.forEach(function (x) { eq(L.splitModel(x.props).error, null, '展开的分割规格非法'); });
+  sim(g.circuit);
+});
+
 console.log('\n========================================');
 console.log(pass + ' 项通过, ' + fail + ' 项失败');
 console.log('========================================\n');

@@ -64,6 +64,112 @@
   }
   L.register = register;
   L.get = function (type) { return defs[type]; };
+
+  /* ---------- 总线分割规格（对齐 hneemann/Digital 的 Splitter） ----------
+     支持三种写法，可用逗号任意混合：
+       "4,2,2"          顺序宽度段，从最低位开始依次占用总线位
+       "1*16" / "4*8"   [Bits]*[Number]，Number 个 Bits 位宽的段
+       "4-7,0-3"        直接指定所使用的总线位，顺序任意；"7-4" 表示反序
+     输入分割：必须完整且唯一地覆盖 0..busBits-1（每位恰好一次）。
+     输出分割：允许重复引用同一位、允许只取部分位，如 "0-7,1-6,4-7"。
+   */
+  L.parseSplit = function (spec, opts) {
+    opts = opts || {};
+    var maxBits = opts.maxBits || U.MAX_BITS || 32;
+    var minBits = Math.max(1, opts.minBits | 0);
+    var given = opts.busBits | 0;          // 输出侧：总线宽度由输入分割确定
+    var segments = [], cursor = 0, maxIndex = -1, derived = 0;
+    function fail(msg) {
+      return { segments: segments, busBits: given || Math.max(derived, minBits), error: msg, inputMap: null };
+    }
+    var text = ('' + (spec == null ? '' : spec)).replace(/[，；;]/g, ',').trim();
+    if (!text) return fail('分割规格为空');
+    var parts = text.split(',');
+    for (var pi = 0; pi < parts.length; pi++) {
+      var part = parts[pi].trim();
+      if (!part) continue;
+      var m = /^(\d+)\s*\*\s*(\d+)$/.exec(part);
+      if (m) {
+        var w = +m[1], cnt = +m[2];
+        if (w < 1 || cnt < 1) return fail('「' + part + '」的位数与个数必须为正整数');
+        if (cnt > maxBits) return fail('「' + part + '」段数超过 ' + maxBits);
+        for (var j = 0; j < cnt; j++) {
+          var bs = [];
+          for (var k = 0; k < w; k++) bs.push(cursor++);
+          segments.push({ bits: bs, width: w });
+        }
+        continue;
+      }
+      m = /^(\d+)\s*-\s*(\d+)$/.exec(part);
+      if (m) {
+        var a = +m[1], b = +m[2], arr = [], q;
+        if (a <= b) for (q = a; q <= b; q++) arr.push(q);
+        else for (q = a; q >= b; q--) arr.push(q);
+        if (a > maxIndex) maxIndex = a;
+        if (b > maxIndex) maxIndex = b;
+        segments.push({ bits: arr, width: arr.length });
+        continue;
+      }
+      m = /^(\d+)$/.exec(part);
+      if (m) {
+        var w2 = +m[1], arr2 = [];
+        if (w2 < 1) return fail('「' + part + '」位数必须为正整数');
+        for (var k2 = 0; k2 < w2; k2++) arr2.push(cursor++);
+        segments.push({ bits: arr2, width: w2 });
+        continue;
+      }
+      return fail('无法解析「' + part + '」，可用 4,2,2 / 1*16 / 4-7,0-3');
+    }
+    if (!segments.length) return fail('分割规格为空');
+    derived = Math.max(cursor, maxIndex + 1);
+    var B = given ? given : Math.max(derived, minBits);
+    if (B > maxBits) return fail('总线宽度 ' + B + ' 超过上限 ' + maxBits + ' 位');
+    for (var si = 0; si < segments.length; si++) {
+      for (var bi = 0; bi < segments[si].bits.length; bi++) {
+        var idx = segments[si].bits[bi];
+        if (idx < 0 || idx >= B) return fail('引用了位 ' + idx + '，超出 ' + B + ' 位总线范围');
+      }
+    }
+    var res = { segments: segments, busBits: B, error: null, inputMap: null };
+    if (opts.requireComplete) {
+      var map = new Array(B), dup = null, missing = [];
+      for (var s2 = 0; s2 < segments.length && dup === null; s2++) {
+        for (var k3 = 0; k3 < segments[s2].bits.length; k3++) {
+          var ib = segments[s2].bits[k3];
+          if (map[ib]) { dup = ib; break; }
+          map[ib] = { seg: s2, bit: k3 };
+        }
+      }
+      if (dup !== null) return fail('位 ' + dup + ' 被重复指定（输入分割要求每位恰好一次）');
+      for (var b2 = 0; b2 < B; b2++) if (!map[b2]) missing.push(b2);
+      if (missing.length) return fail('位 ' + missing.slice(0, 8).join(',') + (missing.length > 8 ? '…' : '') +
+        ' 未指定（输入分割必须完整覆盖 0-' + (B - 1) + '）');
+      res.inputMap = map;
+    }
+    return res;
+  };
+
+  // 解析元件的两个分割规格，得到总线位宽、段定义、位映射与错误信息。
+  // 旧电路（props 中没有 inSplit / outSplit）走 legacy 分支，引脚与行为保持不变。
+  L.splitModel = function (p) {
+    p = p || {};
+    if (p.inSplit === undefined && p.outSplit === undefined) {
+      var n = U.clamp(p.bits || 1, 1, U.MAX_BITS);
+      return { legacy: true, error: null, busBits: n, mode: p.mode === 'combine' ? 'combine' : 'split', inSegments: [], outSegments: [], inputMap: null };
+    }
+    var bits = U.clamp(p.bits || 8, 1, U.MAX_BITS);
+    var inSpec = (p.inSplit === '' || p.inSplit == null) ? String(bits) : p.inSplit;
+    var inp = L.parseSplit(inSpec, { minBits: bits, requireComplete: true });
+    if (inp.error) return { legacy: false, error: '输入分割：' + inp.error, busBits: inp.busBits, inSegments: inp.segments, outSegments: [], inputMap: null };
+    var B = inp.busBits;
+    var outSpec = (p.outSplit === '' || p.outSplit == null) ? String(B) : p.outSplit;
+    var outp = L.parseSplit(outSpec, { busBits: B });
+    if (outp.error) return { legacy: false, error: '输出分割：' + outp.error, busBits: B, inSegments: inp.segments, outSegments: outp.segments, inputMap: inp.inputMap };
+    return {
+      legacy: false, error: null, busBits: B,
+      inSegments: inp.segments, outSegments: outp.segments, inputMap: inp.inputMap
+    };
+  };
   L.pinsOf = function (comp) {
     var d = defs[comp.type];
     if (!d) return [];
@@ -341,35 +447,95 @@
       return { y: sig(r & m) };
     }
   });
-  register({
-    type: 'splitter', name: '总线分线器 / 合线器', cat: '组合逻辑', shape: 'splitter', hw: 3,
-    hh: function (p) { return p.bits + 1; },
-    props: { bits: 4, mode: 'split' },
-    propDefs: [propNum('bits', '总线位宽', 2, 16), propSel('mode', '模式', [['split', '拆分（总线→位）'], ['combine', '合并（位→总线）']])],
+  var splitterDef = register({
+    type: 'splitter', name: '总线分线器 / 合线器', cat: '组合逻辑', shape: 'splitter', hw: 4,
+    hh: function (p) {
+      var m = L.splitModel(p);
+      return Math.max(2, (m.legacy ? m.busBits : Math.max(m.inSegments.length, m.outSegments.length) || 1) + 1);
+    },
+    props: { bits: 8, inSplit: '8', outSplit: '1*8' },
+    propDefs: [
+      propNum('bits', '总线位宽（下限）', 1, 32),
+      propText('inSplit', '输入分割'),
+      propText('outSplit', '输出分割')
+    ],
     pins: function (p) {
-      var a = [], n = p.bits;
-      if (p.mode === 'combine') {
-        a.push(P('bus', 4, 0, 'out', n, 1, 0));
-        for (var i = 0; i < n; i++) a.push(P('b' + i, -4, 2 * i - (n - 1), 'in', 1, -1, 0));
-      } else {
-        a.push(P('bus', -4, 0, 'in', n, -1, 0));
-        for (var j = 0; j < n; j++) a.push(P('b' + j, 4, 2 * j - (n - 1), 'out', 1, 1, 0));
+      var m = L.splitModel(p), a = [], i, pin, w;
+      if (m.legacy) {
+        var n = m.busBits;
+        if (m.mode === 'combine') {
+          a.push(P('bus', 4, 0, 'out', n, 1, 0));
+          for (i = 0; i < n; i++) a.push(P('b' + i, -4, 2 * i - (n - 1), 'in', 1, -1, 0));
+        } else {
+          a.push(P('bus', -4, 0, 'in', n, -1, 0));
+          for (i = 0; i < n; i++) a.push(P('b' + i, 4, 2 * i - (n - 1), 'out', 1, 1, 0));
+        }
+        return a;
+      }
+      if (m.error) {
+        var nb = U.clamp(p.bits || 1, 1, U.MAX_BITS);
+        a.push(P('i0', -4, 0, 'in', nb, -1, 0));
+        a.push(P('o0', 4, 0, 'out', nb, 1, 0));
+        return a;
+      }
+      var ni = m.inSegments.length, no = m.outSegments.length;
+      for (i = 0; i < ni; i++) {
+        w = m.inSegments[i].width;
+        pin = P('i' + i, -4, 2 * i - (ni - 1), 'in', w, -1, 0);
+        pin.label = 'i' + i + (w > 1 ? '[' + (w - 1) + ':0]' : '');
+        a.push(pin);
+      }
+      for (i = 0; i < no; i++) {
+        w = m.outSegments[i].width;
+        pin = P('o' + i, 4, 2 * i - (no - 1), 'out', w, 1, 0);
+        pin.label = 'o' + i + (w > 1 ? '[' + (w - 1) + ':0]' : '');
+        a.push(pin);
       }
       return a;
     },
     eval: function (i, st, p) {
-      var o = {}, k, n = p.bits;
-      if (p.mode === 'combine') {
-        var v = 0, z = 0;
-        for (k = 0; k < n; k++) { var s = VAL(i['b' + k]); v |= (s.v & 1) << k; z |= (s.z & 1) << k; }
-        o.bus = sig(v, z);
-      } else {
-        var b = VAL(i.bus);
-        for (k = 0; k < n; k++) o['b' + k] = ((b.z >> k) & 1) ? sig(0, 1) : sig((b.v >> k) & 1);
+      var m = L.splitModel(p), o = {}, k, b;
+      if (m.legacy) {
+        var n = m.busBits;
+        if (m.mode === 'combine') {
+          var lv = 0, lz = 0;
+          for (k = 0; k < n; k++) { var ls = VAL(i['b' + k]); lv |= (ls.v & 1) << k; lz |= (ls.z & 1) << k; }
+          o.bus = sig(lv, lz);
+        } else {
+          var lb = VAL(i.bus);
+          for (k = 0; k < n; k++) o['b' + k] = ((lb.z >> k) & 1) ? sig(0, 1) : sig((lb.v >> k) & 1);
+        }
+        return o;
+      }
+      if (m.error) return { o0: sig(0, 0) };
+      var bv = 0, bz = 0;
+      for (b = 0; b < m.busBits; b++) {
+        var src = m.inputMap[b], s = VAL(i['i' + src.seg]);
+        if (((s.v >>> src.bit) & 1)) bv = (bv | (1 << b)) >>> 0;
+        if (((s.z >>> src.bit) & 1)) bz = (bz | (1 << b)) >>> 0;
+      }
+      for (var si = 0; si < m.outSegments.length; si++) {
+        var seg = m.outSegments[si], v = 0, z = 0;
+        for (k = 0; k < seg.bits.length; k++) {
+          var ib = seg.bits[k];
+          if ((bv >>> ib) & 1) v = (v | (1 << k)) >>> 0;
+          if ((bz >>> ib) & 1) z = (z | (1 << k)) >>> 0;
+        }
+        o['o' + si] = sig(v, z);
       }
       return o;
     }
   });
+
+  // 元件面板里提供三种常用预设（都是同一个元件，仅默认分割规格不同）
+  (function () {
+    var cat = categories.filter(function (x) { return x.name === '组合逻辑'; })[0];
+    if (!cat) return;
+    var at = cat.items.indexOf(splitterDef);
+    cat.items.splice(at + 1, 0,
+      { type: 'splitter', name: '总线合线器（位 → 总线）', props: { bits: 8, inSplit: '1*8', outSplit: '8' } },
+      { type: 'splitter', name: '总线任意分割器（4,2,2）', props: { bits: 8, inSplit: '4,2,2', outSplit: '0-7,1-6,4-7' } });
+  })();
 
   /* ================= 时序逻辑 ================= */
   function edge(st, clk, prop) {
@@ -609,6 +775,11 @@
     var d = defs[type]; if (!d) throw new Error('未知元件: ' + type);
     var c = { id: U.uid('c'), type: type, x: x, y: y, rot: 0, props: U.clone(d.props) };
     if (props) for (var k in props) c.props[k] = props[k];
+    // 旧代码 / 旧脚本用 {bits, mode} 创建分线器：去掉默认分割规格，保持 bus + b0…bN 语义
+    if (type === 'splitter' && props && props.mode !== undefined &&
+        props.inSplit === undefined && props.outSplit === undefined) {
+      delete c.props.inSplit; delete c.props.outSplit;
+    }
     if (type === 'hdl' && props && props.hdlPorts) c.props.hdlPorts = U.clone(props.hdlPorts);
     return c;
   };

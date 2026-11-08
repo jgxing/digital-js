@@ -217,14 +217,35 @@
           emit(outNet(c, 'y'), se); break;
         }
         case 'splitter': {
-          var n2 = p.bits, bus = p.mode === 'combine' ? outNet(c, 'bus') : rd(c, 'bus', n2);
-          if (p.mode === 'combine') {
-            var lst = [];
-            for (i = n2 - 1; i >= 0; i--) lst.push(rd(c, 'b' + i, 1));
-            emit(bus, isV ? '{' + lst.join(', ') + '}' : lst.join(' & '));
-          } else {
-            for (i = 0; i < n2; i++) emit(outNet(c, 'b' + i), bit(bus, i));
+          var sm = L.splitModel(p);
+          if (sm.legacy) {
+            var n2 = sm.busBits, busL = sm.mode === 'combine' ? outNet(c, 'bus') : rd(c, 'bus', n2);
+            if (sm.mode === 'combine') {
+              var lstL = [];
+              for (i = n2 - 1; i >= 0; i--) lstL.push(rd(c, 'b' + i, 1));
+              emit(busL, isV ? '{' + lstL.join(', ') + '}' : lstL.join(' & '));
+            } else {
+              for (i = 0; i < n2; i++) emit(outNet(c, 'b' + i), bit(busL, i));
+            }
+            break;
           }
+          if (sm.error) {
+            warnings.push('分线器 ' + safe(c.id, 'x') + ' 分割规格错误：' + sm.error + '，该元件未导出');
+            break;
+          }
+          var busName = uniq('split_bus_' + safe(c.id, 'x'), used);
+          decl.push(isV
+            ? '  wire [' + (sm.busBits - 1) + ':0] ' + busName + ';'
+            : '  signal ' + busName + ' : std_logic_vector(' + (sm.busBits - 1) + ' downto 0);');
+          for (i = 0; i < sm.busBits; i++) {
+            var srcSeg = sm.inputMap[i].seg, srcNet = netRef(pinNet[c.id + '|i' + srcSeg]);
+            emit(bit(busName, i), srcNet ? bit(srcNet, sm.inputMap[i].bit) : K(1, 0));
+          }
+          sm.outSegments.forEach(function (seg, oi) {
+            var on = outNet(c, 'o' + oi);
+            if (!on) return;
+            for (var kb = 0; kb < seg.bits.length; kb++) emit(bit(on, kb), bit(busName, seg.bits[kb]));
+          });
           break;
         }
         case 'dff': case 'register': {
@@ -412,12 +433,8 @@
     function getBit(sig, idx) {
       var key = sig + '#' + idx;
       if (splitters[key]) return splitters[key];
-      var n = U.clamp(bitsOf(sig), 2, 16), nm = fresh(sig + '_b' + idx);
-      add('splitter', { bits: n, mode: 'split' }, (function () {
-        var cn = { bus: sig };
-        for (var k = 0; k < n; k++) cn['b' + k] = k === idx ? nm : fresh(sig + '_x' + k);
-        return cn;
-      })());
+      var n = U.clamp(bitsOf(sig), 2, 32), bi = U.clamp(idx, 0, n - 1), nm = fresh(sig + '_b' + idx);
+      add('splitter', { bits: n, inSplit: String(n), outSplit: bi + '-' + bi }, { i0: sig, o0: nm });
       splitters[key] = nm; return nm;
     }
 
@@ -433,18 +450,27 @@
           if (lo > hi) { var t = lo; lo = hi; hi = t; }
           if (hi === lo) return getBit(e.name, lo);
           var out = fresh(e.name + '_sl');
-          var bits = U.clamp(bitsOf(e.name), hi + 1, 16);
+          var bits = U.clamp(bitsOf(e.name), hi + 1, 32);
           add('shift', { bits: bits, dir: 'r' }, { a: e.name, sh: literal({ t: 'num', v: lo, bits: 5 }), y: out });
           return out;
         }
         case 'concat': case 'rep': {
           var parts = e.t === 'rep' ? Array(e.n).fill(e.a) : e.parts;
           var names = parts.map(exprSig);
-          var nb = names.reduce(function (s, x) { return s + bitsOf(x); }, 0);
-          var out2 = fresh('cat');
-          add('splitter', { bits: U.clamp(nb, 2, 16), mode: 'combine' }, (function () {
-            var cn = { bus: out2 }; names.forEach(function (x, k) { cn['b' + k] = x; }); return cn;
-          })());
+          var widths = names.map(function (x) { return U.clamp(bitsOf(x), 1, 32); });
+          var nb = widths.reduce(function (s, x) { return s + x; }, 0);
+          var nb2 = U.clamp(nb, 1, 32);
+          if (nb > 32) warn.push('拼接表达式为 ' + nb + ' 位，超过 32 位上限，已截断');
+          if (nb > nb2) {
+            var acc = 0, ws = [];
+            for (var wi = 0; wi < widths.length && acc < nb2; wi++) {
+              var w = Math.min(widths[wi], nb2 - acc); ws.push(w); acc += w;
+            }
+            widths = ws; names = names.slice(0, ws.length);
+          }
+          var out2 = fresh('cat'), cn2 = { o0: out2 };
+          names.forEach(function (x, k) { cn2['i' + k] = x; });
+          add('splitter', { bits: nb2, inSplit: widths.join(','), outSplit: String(nb2) }, cn2);
           return out2;
         }
         case 'un': {
@@ -492,7 +518,10 @@
               o = fresh('sh'); add('shift', { bits: bv, dir: e.op === '<<' ? 'l' : 'r' }, { a: l, sh: r, y: o }); return o;
             }
             case '++': {
-              o = fresh('cat'); add('splitter', { bits: U.clamp(bv * 2, 2, 16), mode: 'combine' }, { bus: o, b0: r, b1: l }); return o;
+              o = fresh('cat');
+              var bw = U.clamp(bv, 1, 16), tot = U.clamp(bv * 2, 1, 32);
+              add('splitter', { bits: tot, inSplit: bw + ',' + bw, outSplit: String(tot) }, { i0: r, i1: l, o0: o });
+              return o;
             }
             case '&&': case '||': {
               o = fresh('log'); add(e.op === '&&' ? 'and' : 'or', { inputs: 2, bits: 1 }, { i0: l, i1: r, y: o }); return o;

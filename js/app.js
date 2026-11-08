@@ -239,6 +239,13 @@
         '<button data-act="delete">✕ 删除</button></div>' +
         '<div class="prop-note">按住 Shift 单击可增减选择对象；拖拽可整体移动（相连导线端点会跟随）。</div>';
     },
+    // 修改「总线位宽」时，把仍是默认形态的分割规格一起同步，避免出现「1*8 配 32 位总线」的不完整输入
+    syncSplitBits: function (p, nb) {
+      if (/^\d+$/.test(String(p.inSplit))) p.inSplit = String(nb);
+      else if (/^1\*\d+$/.test(String(p.inSplit))) p.inSplit = '1*' + nb;
+      if (/^1\*\d+$/.test(String(p.outSplit))) p.outSplit = '1*' + nb;
+      else if (/^\d+$/.test(String(p.outSplit))) p.outSplit = String(nb);
+    },
     propRow: function (label, key, value, extra) {
       return '<div class="prop-row"><label>' + U.escapeHtml(label) + '</label><input data-prop="' + key + '" value="' + U.escapeHtml(value == null ? '' : value) + '" ' + (extra || '') + '></div>';
     },
@@ -262,6 +269,15 @@
           else html += '<div class="prop-row"><label>' + U.escapeHtml(pd.label) + '</label><input data-prop="' + pd.k + '" ' +
             (pd.t === 'number' ? 'type="number" min="' + (pd.min || 0) + '" max="' + (pd.max || 9999) + '"' : 'type="text"') + ' value="' + U.escapeHtml(v == null ? '' : v) + '"></div>';
         });
+      }
+      if (c.type === 'splitter') {
+        var sm = L.splitModel(c.props);
+        html += '<div class="prop-note"' + (sm.error ? ' style="color:#dc2626"' : '') + '>' +
+          (sm.legacy ? '旧版分线器（bus + b0…bN，' + sm.busBits + ' 位）。删除后重新放置即可使用新的任意分割语法。'
+            : sm.error ? '⚠ ' + U.escapeHtml(sm.error)
+              : '✓ 总线 ' + sm.busBits + ' 位 · 输入 ' + sm.inSegments.length + ' 段 · 输出 ' + sm.outSegments.length + ' 段') + '</div>';
+        html += '<div class="prop-note">输入分割 / 输出分割：<code>4,2,2</code>（顺序宽度）、<code>1*16</code>（位宽*个数）、<code>4-7,0-3</code>（直接指定位，可乱序、可反序 <code>7-4</code>），三种可混合。' +
+          '输入分割必须<b>完整且唯一</b>覆盖所有位；输出分割可重复引用，如 <code>0-7,1-6,4-7</code>。总线最多 32 位。</div>';
       }
       html += '<div style="padding:8px;display:flex;gap:6px"><button data-act="rotate">⟳ 旋转</button><button data-act="copy">复制</button><button data-act="delete">✕ 删除</button></div>';
       if (L.interactive(c.type)) html += '<div class="prop-note">上电后单击该元件可直接改变输入值。</div>';
@@ -295,7 +311,10 @@
           self.pushUndo();
           if (comp) {
             if (k === 'x' || k === 'y') comp[k] = Math.round(v);
-            else comp.props[k] = v;
+            else {
+              comp.props[k] = v;
+              if (comp.type === 'splitter' && k === 'bits') self.syncSplitBits(comp.props, v);
+            }
             self.rebuild(); self.showProps();
           } else {
             if (k === 'circuit-name') self.circuit.name = v;
@@ -794,6 +813,11 @@
         '<li><b>单门步进</b>：一次只更新一个门并高亮，用于定位振荡源。</li>' +
         '<li>支持三态高阻 Z、总线冲突检测、1–32 位总线、上电复位元件。</li></ul>' +
         '<h4>编辑</h4><p>左侧选元件 → 画布单击放置；从引脚拖到另一引脚连线；单击添加拐点，Tab 切换拐向，双击 / Enter 结束，Esc 取消。滚轮缩放，中键或空格+拖拽平移。</p>' +
+        '<h4>总线分割（分线器 / 合线器）</h4><ul>' +
+        '<li>元件面板提供<b>拆分 / 合并 / 任意分割</b>三种预设；属性面板可分别编辑「输入分割」与「输出分割」，输入引脚 <code>i0…</code> 按输入分割拼成内部总线，输出引脚 <code>o0…</code> 按输出分割取位。</li>' +
+        '<li><code>4,2,2</code> = 3 段（宽 4/2/2 位）；<code>1*16</code> = 16 个 1 位段（位宽*个数）；<code>4-7,0-3</code> = 直接指定所用的总线位，段顺序任意，<code>7-4</code> 为反序；三种写法可混合，最多 32 位。</li>' +
+        '<li><b>输入分割必须完整且唯一</b>覆盖 0..N-1 每一位，否则属性面板会指出重复 / 遗漏的位；<b>输出分割可以重复使用位</b>，如 <code>0-7,1-6,4-7</code>。</li>' +
+        '<li>总线位宽由输入分割自动推导；「总线位宽」属性作为下限，修改时会同步默认形态的分割规格。旧版 bus + b0…bN 电路仍可正常打开与仿真。</li></ul>' +
         '<h4>快捷键</h4><p><span class="kbd">Del</span>删除 <span class="kbd">R</span>旋转 <span class="kbd">Ctrl+Z/Y</span>撤销重做 <span class="kbd">Ctrl+C/V/D</span>复制粘贴复制 <span class="kbd">Ctrl+A</span>全选 <span class="kbd">Ctrl+S</span>保存 <span class="kbd">F</span>适配 <span class="kbd">F2</span>编辑属性 <span class="kbd">+/-</span>缩放</p>' +
         '<h4>HDL 支持范围</h4><ul>' +
         '<li><b>导出</b>：整图导出为可综合的 Verilog / VHDL 结构网表；门、多路器、译码器、加法器、比较器、移位器、触发器、寄存器、计数器、RAM/ROM、74xx、HDL 元件均覆盖。</li>' +

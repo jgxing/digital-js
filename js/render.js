@@ -215,6 +215,11 @@
     });
   }
 
+  function shortSpec(s, n) {
+    s = '' + (s == null ? '' : s);
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  }
+
   function drawComponent(e, c, sel, hov) {
     var ctx = e.ctx, g = e.g, s = e.s;
     var d = L.get(c.type) || L.get('text');
@@ -265,7 +270,13 @@
         title = c.props.name || 'HDL';
       }
       txt(ctx, title, X, Y + (shape === 'hdl' ? 3 * s : 0), Math.max(9, 11 * s), C.text, 'center', true);
-      if (shape === 'splitter') txt(ctx, (c.props.mode === 'combine' ? '→' : '←') + c.props.bits, X, Y + hh * .55, Math.max(7, 8 * s), C.dim);
+      if (shape === 'splitter') {
+        var sm = L.splitModel(c.props), lab;
+        if (sm.legacy) lab = (c.props.mode === 'combine' ? '→' : '←') + sm.busBits + 'b (旧)';
+        else if (sm.error) lab = '⚠ 分割规格错误';
+        else lab = sm.busBits + 'b  ' + shortSpec(c.props.inSplit, 9) + ' → ' + shortSpec(c.props.outSplit, 9);
+        txt(ctx, lab, X, Y + hh * .55, Math.max(7, 8 * s), sm.error ? '#dc2626' : C.dim);
+      }
     } else if (shape === 'dip') {
       rr(ctx, X - hw, Y - hh, hw * 2, hh * 2, 3 * s); ctx.fillStyle = '#1e293b'; ctx.fill(); ctx.strokeStyle = '#0f172a'; ctx.stroke();
       ctx.beginPath(); ctx.arc(X - hw, Y - hh + 6 * s, 4 * s, 0, 7); ctx.fillStyle = '#0f172a'; ctx.fill();
