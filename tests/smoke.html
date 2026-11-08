@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digital.js · 数字电路模拟软件</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<header id="toolbar">
+  <div class="brand"><span class="logo">◧</span><div><b>Digital<span>.js</span></b><small>数字电路模拟器</small></div></div>
+
+  <div class="tb-group">
+    <span class="tb-label">文件</span>
+    <button data-act="new" title="新建电路">新建</button>
+    <button data-act="open" title="打开 .json 电路">打开</button>
+    <button data-act="save" title="保存电路 (Ctrl+S)">保存</button>
+    <button data-act="export-menu" title="导出">导出 ▾</button>
+  </div>
+
+  <div class="tb-group">
+    <span class="tb-label">编辑</span>
+    <button data-act="undo" title="撤销 (Ctrl+Z)">↶</button>
+    <button data-act="redo" title="重做 (Ctrl+Y)">↷</button>
+    <button data-act="rotate" title="旋转 (R)">⟳</button>
+    <button data-act="delete" title="删除 (Del)">✕</button>
+    <button data-act="fit" title="适配视图 (F)">⤢</button>
+  </div>
+
+  <div class="tb-group sim-group">
+    <span class="tb-label">仿真</span>
+    <button data-act="power" id="btn-power" class="primary" title="上电 / 断电">⏻ 上电</button>
+    <button data-act="gate-step" title="单门步进（定位振荡）">▸| 单门</button>
+    <button data-act="step" title="单步（一个 tick）">▸ 单步</button>
+    <button data-act="run" id="btn-run" title="连续运行 / 暂停">▶ 运行</button>
+    <select id="speed" title="运行速度（tick / 秒）">
+      <option value="1">1 Hz</option><option value="2">2 Hz</option><option value="5" selected>5 Hz</option>
+      <option value="10">10 Hz</option><option value="25">25 Hz</option><option value="50">50 Hz</option>
+      <option value="100">100 Hz</option><option value="500">500 Hz</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="show-values" checked> 电平</label>
+  </div>
+
+  <div class="tb-group">
+    <span class="tb-label">工具</span>
+    <button data-act="truth" title="分析真值表并最小化">真值表</button>
+    <button data-act="hdl" title="Verilog / VHDL 导出与编辑">HDL ▾</button>
+    <button data-act="examples" title="内置示例">示例</button>
+    <button data-act="help" title="帮助与快捷键">?</button>
+  </div>
+
+  <div class="tb-right"><span id="top-status">就绪</span></div>
+</header>
+
+<main>
+  <aside id="palette" class="side">
+    <div class="panel-head"><b>元件库</b><span id="comp-count"></span></div>
+    <div class="search-box"><input id="search" placeholder="搜索元件…" autocomplete="off"></div>
+    <div id="palette-list" class="scroll"></div>
+    <div class="panel-head sub"><b>自定义 HDL 元件</b><button id="add-hdl" title="新建 HDL 元件">＋</button></div>
+    <div id="hdl-list" class="scroll small"></div>
+  </aside>
+
+  <section id="workspace">
+    <div id="canvas-wrap">
+      <canvas id="canvas"></canvas>
+      <div id="canvas-hint" class="hint"></div>
+      <div id="place-badge" class="place-badge hidden"></div>
+    </div>
+
+    <div id="bottom-panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="wave">时序波形</button>
+        <button class="tab" data-tab="table">真值表 / 分析</button>
+        <button class="tab" data-tab="tests">测试用例</button>
+        <button class="tab" data-tab="log">消息 <span id="log-badge" class="badge hidden">0</span></button>
+        <div class="tab-right"><button id="toggle-bottom" title="折叠 / 展开">▾</button></div>
+      </div>
+      <div class="tab-body">
+        <div id="tab-wave" class="tab-pane active"><canvas id="wave"></canvas><div class="pane-tip">右键导线 → 加入/移出观测</div></div>
+        <div id="tab-table" class="tab-pane scroll"><div class="empty">点击工具栏「真值表」分析当前电路</div></div>
+        <div id="tab-tests" class="tab-pane">
+          <div class="test-editor"><textarea id="test-editor" spellcheck="false" placeholder="a b | y&#10;0 0 | 0&#10;0 1 | 1"></textarea>
+            <div class="test-side"><button data-act="run-tests" class="primary">▶ 运行测试</button><button data-act="gen-tests">生成模板</button><div id="test-summary"></div></div>
+          </div>
+          <div id="test-result" class="scroll"></div>
+        </div>
+        <div id="tab-log" class="tab-pane scroll"></div>
+      </div>
+    </div>
+  </section>
+
+  <aside id="inspector" class="side">
+    <div class="panel-head"><b>属性</b></div>
+    <div id="props" class="scroll"></div>
+    <div class="panel-head sub"><b>电路信息</b></div>
+    <div id="circuit-info" class="scroll small"></div>
+    <div class="panel-head sub"><b>波形观测</b><button id="watch-clear" title="清空">清空</button></div>
+    <div id="watch-list" class="scroll small"></div>
+  </aside>
+</main>
+
+<footer id="status-bar">
+  <span id="status-text">就绪</span>
+  <span class="spacer"></span>
+  <span id="status-sim" class="pill">未上电</span>
+  <span id="status-coords">—</span>
+  <span id="status-zoom">100%</span>
+  <span id="status-count">0 元件</span>
+</footer>
+
+<div id="context-menu" class="ctx hidden"></div>
+<div id="modal-root"></div>
+<input type="file" id="file-input" hidden>
+<input type="file" id="hdl-file-input" hidden accept=".v,.sv,.vhdl,.vhd,.txt">
+
+<script src="../js/util.js"></script>
+<script src="../js/library.js"></script>
+<script src="../js/netlist.js"></script>
+<script src="../js/simulator.js"></script>
+<script src="../js/hdl-parse.js"></script>
+<script src="../js/hdl-io.js"></script>
+<script src="../js/analysis.js"></script>
+<script src="../js/examples.js"></script>
+<script src="../js/render.js"></script>
+<script src="../js/editor.js"></script>
+<script src="../js/app.js"></script>
+<script src="smoke.js"></script></body>
+</html>
