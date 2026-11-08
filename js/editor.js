@@ -386,7 +386,7 @@
     if (ctrl && k.toLowerCase() === 'x') { ev.preventDefault(); ui().clipboard = ED.copy(); ED.deleteSelection(); return; }
     if (ctrl && k.toLowerCase() === 'v') { ev.preventDefault(); ED.paste(ui().clipboard, ui().cursor ? ui().cursor[0] : 4, ui().cursor ? ui().cursor[1] : 4); return; }
     if (ctrl && k.toLowerCase() === 'a') { ev.preventDefault(); ED.selectAll(); return; }
-    if (ctrl && k.toLowerCase() === 's') { ev.preventDefault(); a.saveFile(); return; }
+    if (ctrl && k.toLowerCase() === 's') { ev.preventDefault(); ev.shiftKey ? a.saveAs() : a.saveFile(); return; }
     if (ctrl && k.toLowerCase() === 'd') { ev.preventDefault(); var cl = ED.copy(); ED.paste(cl, 4, 4); return; }
     if (k === 'Delete' || k === 'Backspace') { ev.preventDefault(); ED.deleteSelection(); return; }
     if (k.toLowerCase() === 'r' && !ctrl) { ED.rotateSelection(90); return; }

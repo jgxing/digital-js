@@ -390,6 +390,26 @@
       else code = code.replace(/\nend rtl;\s*$/, '\n' + outAssign.join('\n') + '\n\nend rtl;\n');
     }
     if (extraModules.length) code += '\n' + extraModules.join('\n\n') + '\n';
+    // 把 $readmemh 用到的数据文件作为注释附在文末，便于在外部仿真器中另存为同名文件
+    var refNames = {};
+    (circuit.components || []).forEach(function (c) {
+      if (c.type === 'hdl' && c.props && c.props.code) {
+        DIG.HDL.memFileRefs(c.props.code).forEach(function (f) { refNames[f] = 1; });
+      }
+    });
+    var refList = Object.keys(refNames);
+    if (refList.length) {
+      var df = circuit.dataFiles || {};
+      warnings.push('自定义 HDL 元件使用 $readmemh 读取 ' + refList.join('、') + '，请在外部仿真器中把文末注释里的数据另存为同名文件');
+      code += '\n' + cm + '==== $readmemh 数据文件（请另存为同名文件后与外部仿真器一起使用）====\n';
+      refList.forEach(function (f) {
+        var txt = DIG.HDL.resolveDataFile(df, f);
+        code += cm + '---- ' + f + ' ----\n';
+        if (txt == null) code += cm + '（未附加，存储器内容全为 0）\n';
+        else code += ('' + txt).split('\n').map(function (l) { return cm + l; }).join('\n') + '\n';
+      });
+      code += cm + '==== 数据文件结束 ====\n';
+    }
     return { code: code, warnings: warnings, ports: ports, module: modName };
   }
 
@@ -584,6 +604,7 @@
       else if (type === 'tribuf') add(type, { bits: 1 }, { a: ins[0], en: ins[1] || '0', y: out });
       else add(type, { inputs: ins.length, bits: 1 }, (function () { var cn = { y: out }; ins.forEach(function (s, i) { cn['i' + i] = s; }); return cn; })());
     });
+    if ((ir.memInit || []).length) warn.push('$readmemh / $readmemb 存储器初始化无法展开为门级电路（请改用「作为 HDL 元件导入」）');
     if ((ir.submodules || []).length) warn.push('包含 ' + ir.submodules.length + ' 个模块实例，未展开（请改用「作为 HDL 元件导入」）');
 
     // ---- 布局 + 网络标签连线 ----

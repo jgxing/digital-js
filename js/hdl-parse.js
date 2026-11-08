@@ -196,10 +196,15 @@
   Parser.prototype.parsePostfix = function (node) {
     if (this.is('[')) {
       this.next();
-      var hi = this.parseExpr(0), lo = hi;
-      if (this.eat(':')) lo = this.parseExpr(0);
-      else if (this.eat('+:') || this.eat('-:')) lo = hi;
+      var hi = this.parseExpr(0), lo = hi, ranged = false;
+      if (this.eat(':')) { lo = this.parseExpr(0); ranged = true; }
+      else if (this.eat('+:') || this.eat('-:')) { lo = hi; ranged = true; }
       this.expect(']');
+      // mem[addr]：若该名字是已声明的存储器，生成「存储器读」节点而不是位选
+      if (!ranged && node.name && this.ir && this.ir.memories &&
+        this.ir.memories.some(function (m) { return m.name === node.name; })) {
+        return { t: 'mrd', name: node.name, idx: hi };
+      }
       return { t: 'sel', name: node.name, hi: hi, lo: lo };
     }
     if (this.is('(')) { // VHDL: a(3) 位选
@@ -216,6 +221,10 @@
     switch (e.t) {
       case 'id': return (ir.widths[e.name] || 1);
       case 'num': return e.bits || 32;
+      case 'mrd': {
+        var md = (ir.memories || []).filter(function (m) { return m.name === e.name; })[0];
+        return md ? md.bits : 32;
+      }
       case 'sel': {
         try { var h = evalE(e.hi, {}, ir) >>> 0, l = evalE(e.lo, {}, ir) >>> 0; return Math.abs(h - l) + 1; } catch (x) { return 1; }
       }
@@ -235,6 +244,15 @@
       case 'id': return (env[e.name] || 0) >>> 0;
       case 'edge': return env['__edge_' + e.name] ? 1 : 0;
       case 'call': return 0;
+      case 'mrd': {
+        var ix = evalE(e.idx, env, ir) >>> 0;
+        var md = (ir.memories || []).filter(function (m) { return m.name === e.name; })[0];
+        var arr = env.__mems && env.__mems[e.name];
+        if (!md || !arr) return 0;
+        var a = ix - md.lo;
+        if (a < 0 || a >= arr.length) return 0;
+        return (arr[a] >>> 0) & U.mask(md.bits);
+      }
       case 'sel': {
         var hi = evalE(e.hi, env, ir) >>> 0, lo = evalE(e.lo, env, ir) >>> 0;
         if (lo > hi) { var t = lo; lo = hi; hi = t; }
@@ -311,6 +329,7 @@
   function lhsOf(P) {
     var e = P.parsePrefix();
     if (e.t === 'id') return { name: e.name, sel: null };
+    if (e.t === 'mrd') return { name: null, mem: { name: e.name, idx: e.idx } };
     if (e.t === 'sel') return { name: e.name, sel: e };
     if (e.t === 'concat') return { name: null, concat: e };
     return { name: e.name || null, sel: null };
@@ -344,7 +363,7 @@
         out.push({ t: 'case', expr: ce, cases: cases, def: def }); continue;
       }
       if (P.is(';')) { P.next(); continue; }
-      if (P.is('$display') || P.is('$write') || P.is('$monitor')) { P.skipTo(';'); P.eat(';'); continue; }
+      if (P.is('$display') || P.is('$write') || P.is('$monitor') || MEM_TASK_RE.test(P.peek().v || '')) { P.skipTo(';'); P.eat(';'); continue; }
       var lhs = lhsOf(P);
       if (!(P.eat('=') || P.eat('<=') || P.eat(':='))) { P.skipTo(';'); P.eat(';'); continue; }
       var expr = P.parseExpr(0); P.eat(';');
@@ -430,8 +449,109 @@
   function emptyIR(name, lang) {
     return {
       name: name, lang: lang, ports: [], regs: [], wires: [], params: {}, widths: {},
+      memories: [], memInit: [],
       continuous: [], comb: [], seq: [], prims: [], submodules: [], errors: []
     };
+  }
+
+  /* ==================== 存储器初始化文件 ($readmemh / $readmemb) ==================== */
+  // 兼容用户习惯的 $memreadh / $memreadb 别名
+  var MEM_TASKS = {
+    '$readmemh': 16, '$readmemb': 2, '$memreadh': 16, '$memreadb': 2
+  };
+  var MEM_TASK_RE = /^\$(?:readmem[hb]|memread[hb])$/i;
+
+  /**
+   * 解析 Verilog 存储器文件文本。
+   * 支持：16/2 进制数值、空白/逗号分隔、// 与 /* *\/ 注释、
+   *       @地址（十六进制，改变后续数据的装入地址）、x/z/? 未知位（按 0 处理）。
+   * 返回 [{addr, v}]。
+   */
+  H.parseMemFile = function (text, radix) {
+    var base = radix === 2 ? 2 : 16;
+    var src = ('' + (text == null ? '' : text))
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/[^\r\n]*/g, ' ')
+      .replace(/#[^\r\n]*/g, ' ');
+    var toks = src.split(/[\s,;]+/), out = [], addr = 0;
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      if (!t) continue;
+      if (t.charAt(0) === '@') {
+        var a = parseInt(t.slice(1).replace(/[xXzZ?]/g, '0'), 16);
+        if (!isNaN(a)) addr = a >>> 0;
+        continue;
+      }
+      var s = t.replace(/_/g, '').replace(/^0[xX]/, '').replace(/[xXzZ?]/g, '0');
+      if (!s) continue;
+      var v = parseInt(s, base);
+      if (isNaN(v)) continue;
+      out.push({ addr: addr++, v: v >>> 0 });
+    }
+    return out;
+  };
+  /** 从电路的数据文件表中按名字查找内容（支持路径与大小写回退） */
+  H.resolveDataFile = function (files, name) {
+    if (!files || !name) return null;
+    if (Object.prototype.hasOwnProperty.call(files, name)) return files[name];
+    var base = ('' + name).replace(/\\/g, '/').split('/').pop();
+    var keys = Object.keys(files), i;
+    for (i = 0; i < keys.length; i++) if (keys[i] === base) return files[keys[i]];
+    for (i = 0; i < keys.length; i++) if (keys[i].toLowerCase() === base.toLowerCase()) return files[keys[i]];
+    return null;
+  };
+  /** 扫描 HDL 源码中被 $readmemh / $memreadh 等引用的文件名 */
+  H.memFileRefs = function (code) {
+    var refs = [], re = /\$(?:readmem[hb]|memread[hb])\s*\(\s*"([^"]+)"/gi, m;
+    while ((m = re.exec('' + (code || '')))) if (refs.indexOf(m[1]) < 0) refs.push(m[1]);
+    return refs;
+  };
+
+  function memRange(P) {
+    // 已消耗 '['：解析 [hi:lo] 或 SV 的 [size]
+    var hiE = P.parseExprUntil([':', ']']);
+    var loE = null;
+    if (P.eat(':')) loE = P.parseExprUntil([']']);
+    P.eat(']');
+    var ev = function (e) { try { return H.evalE(e, {}, { widths: {} }) >>> 0; } catch (x) { return 0; } };
+    var hi = ev(hiE), lo = loE ? ev(loE) : 0;
+    if (!loE) return { lo: 0, hi: Math.max(0, hi - 1), depth: Math.max(1, hi) };
+    var a = Math.min(hi, lo), b = Math.max(hi, lo);
+    return { lo: a, hi: b, depth: b - a + 1 };
+  }
+
+  function memArgNum(toks) {
+    if (!toks || !toks.length) return null;
+    try {
+      var sp = new Parser(toks.concat([{ t: 'eof', v: '' }]), 'verilog', null);
+      return H.evalE(sp.parseExpr(0), {}, { widths: {} }) >>> 0;
+    } catch (e) { return null; }
+  }
+
+  /** 从 initial 块的记号流中提取 $readmemh(...) 调用 */
+  function collectMemInit(ir, toks) {
+    for (var i = 0; i < toks.length; i++) {
+      var nm = (toks[i].v || '').toLowerCase();
+      if (!MEM_TASK_RE.test(nm) || !toks[i + 1] || toks[i + 1].v !== '(') continue;
+      var j = i + 2, args = [], cur = [], dep = 0;
+      while (j < toks.length) {
+        var t = toks[j];
+        if ('([{'.indexOf(t.v) >= 0) dep++;
+        else if (')]}'.indexOf(t.v) >= 0) { if (dep === 0) break; dep--; }
+        if (t.v === ',' && dep === 0) { args.push(cur); cur = []; j++; continue; }
+        cur.push(t); j++;
+      }
+      if (cur.length) args.push(cur);
+      var file = args[0] && args[0][0] && args[0][0].t === 'str' ? args[0][0].v : '';
+      var mem = args[1] && args[1][0] && args[1][0].t === 'id' ? args[1][0].v : '';
+      if (file && mem) {
+        ir.memInit.push({
+          task: nm, file: file, mem: mem, radix: MEM_TASKS[nm],
+          start: memArgNum(args[2]), end: memArgNum(args[3])
+        });
+      }
+      i = j;
+    }
   }
   function addPort(ir, name, dir, bits) {
     dir = ('' + dir).toLowerCase();
@@ -531,11 +651,25 @@
       }
       if (w === 'wire' || w === 'reg' || w === 'logic' || w === 'tri') {
         P.next(); var bw = widthFromRange(P);
-        var wn = [];
-        do { if (P.is('=') || P.is(';') || P.is('[')) break; wn.push(P.next().v); } while (P.eat(','));
+        var decls = [];
+        for (;;) {
+          if (P.is('=') || P.is(';')) break;
+          if (P.peek().t !== 'id') { P.next(); continue; }
+          var dn = P.next().v, mr = null;
+          if (P.eat('[')) mr = memRange(P);       // reg [7:0] mem [0:255] 存储器数组
+          decls.push({ name: dn, mem: mr });
+          if (P.eat(',')) continue;
+          break;
+        }
         if (P.eat('=')) P.parseExprUntil([';']);
         P.eat(';');
-        wn.forEach(function (nm) { ir.widths[nm] = bw; if (w !== 'wire' && w !== 'tri') ir.regs.push({ name: nm, bits: bw, init: 0 }); else ir.wires.push({ name: nm, bits: bw }); });
+        decls.forEach(function (d) {
+          ir.widths[d.name] = bw;
+          if (d.mem) {
+            ir.memories.push({ name: d.name, bits: bw, lo: d.mem.lo, hi: d.mem.hi, depth: U.clamp(d.mem.depth, 1, 65536) });
+          } else if (w === 'wire' || w === 'tri') ir.wires.push({ name: d.name, bits: bw });
+          else ir.regs.push({ name: d.name, bits: bw, init: 0 });
+        });
         continue;
       }
       if (w === 'parameter' || w === 'localparam') {
@@ -576,7 +710,24 @@
         else ir.seq.push({ clocks: clocks, stmts: body });
         continue;
       }
-      if (w === 'initial') { P.skipTo('end'); P.eat('end'); continue; }
+      if (w === 'initial') {
+        P.next();
+        var itoks = [];
+        if (P.eat('begin')) {
+          var idep = 1;
+          while (P.peek().t !== 'eof' && idep > 0) {
+            if (P.is('begin') || P.is('fork')) idep++;
+            else if (P.is('end') || P.is('join')) { idep--; if (!idep) break; }
+            itoks.push(P.next());
+          }
+          P.eat('end'); P.eat('join');
+        } else {
+          while (P.peek().t !== 'eof' && !P.is(';')) itoks.push(P.next());
+          P.eat(';');
+        }
+        collectMemInit(ir, itoks);
+        continue;
+      }
       if (w === 'generate' || w === 'endgenerate' || w === 'specify' || w === 'defparam') { P.skipTo(';'); P.eat(';'); continue; }
       // 门级原语 / 模块实例化
       if (P.peek().t === 'id') {
@@ -791,12 +942,22 @@
     Object.keys(ir.params).forEach(function (k) { ir.widths[k] = 32; });
     return {
       name: ir.name, lang: lang, code: code, ir: ir,
-      ports: ir.ports.map(function (p) { return { name: p.name, dir: p.dir, bits: Math.min(32, Math.max(1, p.bits | 0)) }; })
+      ports: ir.ports.map(function (p) { return { name: p.name, dir: p.dir, bits: Math.min(32, Math.max(1, p.bits | 0)) }; }),
+      memFiles: (ir.memInit || []).map(function (m) { return m.file; })
     };
   };
 
   /* ==================== IR 执行 ==================== */
   function assignTo(env, lhs, val, ir) {
+    if (lhs.mem) {
+      var md = (ir.memories || []).filter(function (m) { return m.name === lhs.mem.name; })[0];
+      var arr = env.__mems && env.__mems[lhs.mem.name];
+      if (md && arr) {
+        var ia = (evalE(lhs.mem.idx, env, ir) >>> 0) - md.lo;
+        if (ia >= 0 && ia < arr.length) arr[ia] = (val >>> 0) & U.mask(md.bits);
+      }
+      return;
+    }
     if (lhs.concat) {
       var shift = 0;
       for (var i = lhs.concat.parts.length - 1; i >= 0; i--) {
@@ -836,9 +997,49 @@
     }
   }
 
+  function envHash(e) {
+    var o = {};
+    for (var k in e) if (k.indexOf('__') !== 0) o[k] = e[k];
+    return JSON.stringify(o);
+  }
+
   H.runIR = function (ir, inputs, st, props, ctx) {
     var env = {}, i, p;
+    ctx = ctx || {};
     st.regs = st.regs || {}; st._edge = st._edge || {};
+    // 存储器：首次求值时按声明建立数组，并装入 $readmemh / $readmemb 数据文件
+    if (!st._memInit) {
+      st.mems = st.mems || {};
+      (ir.memories || []).forEach(function (m) {
+        if (!st.mems[m.name] || st.mems[m.name].length !== m.depth) {
+          var arr = new Array(m.depth);
+          for (var z = 0; z < m.depth; z++) arr[z] = 0;
+          st.mems[m.name] = arr;
+        }
+      });
+      var files = ctx.dataFiles || (props && props.dataFiles) || null;
+      (ir.memInit || []).forEach(function (mi) {
+        var md = (ir.memories || []).filter(function (m) { return m.name === mi.mem; })[0];
+        if (!md) { if (ctx.error) ctx.error(mi.task + '：找不到存储器声明 ' + mi.mem); return; }
+        var text = H.resolveDataFile(files, mi.file);
+        if (text == null) {
+          if (ctx.error) ctx.error(mi.task + '：缺少数据文件「' + mi.file + '」，请在「文件 → 数据文件」中附加');
+          return;
+        }
+        var vals = H.parseMemFile(text, mi.radix);
+        var first = mi.start == null ? md.lo : mi.start;
+        var last = mi.end == null ? md.hi : mi.end;
+        var target = st.mems[md.name];
+        for (var q = 0; q < vals.length; q++) {
+          var abs = first + vals[q].addr;
+          if (abs > last) continue;
+          var ix = abs - md.lo;
+          if (ix >= 0 && ix < target.length) target[ix] = vals[q].v & U.mask(md.bits);
+        }
+      });
+      st._memInit = true;
+    }
+    env.__mems = st.mems;
     for (i = 0; i < ir.ports.length; i++) {
       p = ir.ports[i];
       if (p.dir === 'out') env[p.name] = (st.regs[p.name] !== undefined ? st.regs[p.name] : 0) >>> 0;
@@ -852,7 +1053,8 @@
     for (i = 0; i < ir.wires.length; i++) { var wn = ir.wires[i].name; if (env[wn] === undefined) env[wn] = 0; ir.widths[wn] = ir.widths[wn] || ir.wires[i].bits; }
     for (var k in ir.params) if (env[k] === undefined) env[k] = ir.params[k];
 
-    // 时序块：边沿触发 + 非阻塞赋值
+    // 时序块：边沿触发 + 非阻塞赋值（存储器写延迟到时间步末生效）
+    var memPending = [];
     for (i = 0; i < ir.seq.length; i++) {
       var sq = ir.seq[i], fire = false;
       for (var c = 0; c < sq.clocks.length; c++) {
@@ -865,16 +1067,20 @@
       if (fire) {
         var pending = [];
         execStmts(sq.stmts, env, pending, ir);
-        pending.forEach(function (a) { assignTo(env, a.lhs, a.val, ir); });
+        pending.forEach(function (a) {
+          if (a.lhs && a.lhs.mem) memPending.push(a);
+          else assignTo(env, a.lhs, a.val, ir);
+        });
       }
     }
     // 组合逻辑：连续赋值 + always @(*) / process，迭代至稳定
     for (var pass = 0; pass < 12; pass++) {
-      var before = JSON.stringify(env);
+      var before = envHash(env);
       for (i = 0; i < ir.continuous.length; i++) assignTo(env, ir.continuous[i].lhs, evalE(ir.continuous[i].expr, env, ir), ir);
       for (i = 0; i < ir.comb.length; i++) execStmts(ir.comb[i].stmts, env, null, ir);
-      if (JSON.stringify(env) === before) break;
+      if (envHash(env) === before) break;
     }
+    for (i = 0; i < memPending.length; i++) assignTo(env, memPending[i].lhs, memPending[i].val, ir);
     // 保存寄存器状态
     for (i = 0; i < ir.regs.length; i++) st.regs[ir.regs[i].name] = env[ir.regs[i].name] >>> 0;
     for (i = 0; i < ir.ports.length; i++) if (ir.ports[i].dir === 'out') st.regs[ir.ports[i].name] = env[ir.ports[i].name] >>> 0;

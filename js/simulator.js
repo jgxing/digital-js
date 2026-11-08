@@ -39,6 +39,7 @@
     var self = this;
     return {
       settling: this.settling, tick: this.tick,
+      dataFiles: (this.circuit && this.circuit.dataFiles) || {},
       error: function (m) { if (self.errors.indexOf(m) < 0) self.errors.push(m); }
     };
   };

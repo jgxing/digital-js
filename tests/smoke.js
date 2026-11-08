@@ -76,6 +76,76 @@
     ok('UI: SVG 导出', function () { var s = D.Render.toSVG(App.circuit, App.sim); if (!/<svg/.test(s)) throw new Error('无 svg'); return s.length + ' 字节'; });
     ok('UI: 属性面板', function () { App.showProps(); return document.querySelectorAll('#props .prop-row').length + ' 行'; });
     ok('UI: 新建 + 撤销', function () { var before = App.circuit.name; App.doAction('new'); App.undo(); if (App.circuit.name !== before) throw new Error('撤销失效'); return '正常'; });
+    ok('UI: 主菜单「另存为」按钮与弹窗', function () {
+      var btn = document.querySelector('#toolbar [data-act="save-as"]');
+      if (!btn) throw new Error('主菜单缺少「另存为」');
+      App.doAction('save-as');
+      var f = document.querySelector('#sa-file'), n = document.querySelector('#sa-name'), r = document.querySelector('#sa-rename');
+      if (!f || !n || !r || !/\.json$/.test(f.value)) throw new Error('另存为弹窗字段缺失');
+      if (!document.querySelector('[data-act="do-save-as"]')) throw new Error('缺少保存按钮');
+      App.closeModal();
+      return f.value;
+    });
+    ok('UI: 另存为写入电路名与数据文件', function () {
+      App.saveAs();
+      var mm = App._modal;
+      mm.querySelector('#sa-file').value = 'copy_test';
+      mm.querySelector('#sa-name').value = '副本电路';
+      mm.querySelector('#sa-rename').checked = true;
+      var dl = D.Util.download, captured = null;
+      D.Util.download = function (name, text) { captured = { name: name, data: JSON.parse(text) }; };
+      try { App.doSaveAs(); } finally { D.Util.download = dl; }
+      if (!captured || captured.name !== 'copy_test.json') throw new Error('文件名错误');
+      if (captured.data.name !== '副本电路') throw new Error('电路名未写入');
+      if (App.circuit.name !== '副本电路') throw new Error('当前电路未改名');
+      if (!('dataFiles' in captured.data)) throw new Error('JSON 未包含数据文件字段');
+      App.undo();
+      return captured.name + ' / ' + captured.data.components.length + ' 元件';
+    });
+    ok('UI: 数据文件管理器列出被引用文件', function () {
+      App.loadCircuit(D.Examples.verilogRom());
+      App.doAction('data-files');
+      var txt = document.querySelector('#df-list').textContent;
+      if (!/firmware\.hex/.test(txt) || !/已附加 1 个数据文件/.test(txt)) throw new Error('未列出已附加文件');
+      if (/尚未附加的数据文件/.test(txt)) throw new Error('误报缺失文件');
+      App.closeModal();
+      return '1 个文件，引用正常';
+    });
+    ok('UI: 数据文件可粘贴添加并参与仿真', function () {
+      App.doAction('data-files');
+      var mm = App._modal;
+      mm.querySelector('#df-name').value = 'extra.hex';
+      mm.querySelector('#df-text').value = 'DE AD BE EF';
+      App.doAction('data-file-add-text', null, null, mm);
+      if (!App.circuit.dataFiles['extra.hex']) throw new Error('未写入数据文件');
+      if (!/已附加/.test(document.querySelector('#df-result').textContent)) throw new Error('缺少反馈');
+      App.closeModal();
+      return '2 个文件';
+    });
+    ok('UI: HDL 编辑器 ROM 示例与数据文件联动', function () {
+      App.openHDLEditor(null);
+      App.hdlExample('rom');
+      var code = document.querySelector('#hdl-src').value;
+      if (!/\$readmemh\("firmware\.hex", mem\)/.test(code)) throw new Error('示例源码缺少 $readmemh');
+      var mod = App.hdlCompile(App._modal);
+      if (!mod || mod.memFiles[0] !== 'firmware.hex') throw new Error('编译未识别数据文件');
+      if (!document.querySelector('[data-act="hdl-data-files"]')) throw new Error('缺少数据文件入口');
+      App.doAction('hdl-data-files');
+      if (!document.querySelector('#df-drop') || !document.querySelector('[data-act="back-to-hdl"]')) throw new Error('数据文件弹窗或返回按钮缺失');
+      App.doAction('back-to-hdl');
+      if (document.querySelector('#hdl-src').value !== code) throw new Error('返回后源码丢失');
+      App.closeModal();
+      return '编译 / 附加 / 返回均正常';
+    });
+    ok('示例: $readmemh ROM 在页面内上电', function () {
+      App.loadCircuit(D.Examples.verilogRom());
+      App.powerToggle();
+      var r = D.Analysis.runTests(App.circuit, App.circuit.testText);
+      if (r.error || r.passed !== r.total) throw new Error(r.error || r.passed + '/' + r.total);
+      if (App.sim.errors.length) throw new Error(App.sim.errors.join('; '));
+      App.repaint();
+      return r.passed + '/' + r.total;
+    });
 
     var pre = document.createElement('pre');
     pre.id = 'SMOKE_RESULT';

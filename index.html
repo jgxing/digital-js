@@ -16,6 +16,8 @@
     <button data-act="new" title="新建电路">新建</button>
     <button data-act="open" title="打开 .json 电路">打开</button>
     <button data-act="save" title="保存电路 (Ctrl+S)">保存</button>
+    <button data-act="save-as" title="另存为… (Ctrl+Shift+S)">另存为</button>
+    <button data-act="data-files" title="管理 $readmemh 使用的存储器数据文件">数据文件</button>
     <button data-act="export-menu" title="导出">导出 ▾</button>
   </div>
 
@@ -114,6 +116,7 @@
 <div id="modal-root"></div>
 <input type="file" id="file-input" hidden>
 <input type="file" id="hdl-file-input" hidden accept=".v,.sv,.vhdl,.vhd,.txt">
+<input type="file" id="data-file-input" hidden multiple accept=".hex,.mem,.mif,.dat,.bin,.txt,.v,.sv">
 
 <script src="js/util.js"></script>
 <script src="js/library.js"></script>

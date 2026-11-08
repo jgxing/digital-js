@@ -311,6 +311,111 @@ t('HDL 导入展开生成合法分割规格', function () {
   sim(g.circuit);
 });
 
+console.log('\n[8] $readmemh 本地数据文件');
+var ROM_SRC = [
+  'module rom16 (',
+  '    input  [3:0] addr,',
+  '    output [7:0] dout',
+  ');',
+  '  reg [7:0] mem [0:15];',
+  '  initial $readmemh("firmware.hex", mem);',
+  '  assign dout = mem[addr];',
+  'endmodule'
+].join('\n');
+var FW = '// 数据文件\n0A 14 1E 28 /* 注释 */ 32 3C 46 50\n@8 5A 64 6E 78 82 8C 96 A0';
+
+t('parseMemFile：16/2 进制、注释、@地址、未知位', function () {
+  var h = D.HDL.parseMemFile('// c\n0A 14,1E\n@8 FF zz\n', 16);
+  eq(h.length, 5);
+  eq(h[0].addr, 0); eq(h[0].v, 0x0A);
+  eq(h[3].addr, 8); eq(h[3].v, 0xFF);
+  eq(h[4].addr, 9); eq(h[4].v, 0);
+  var b = D.HDL.parseMemFile('0001 0010 1x00', 2);
+  eq(b[1].v, 2); eq(b[2].v, 8);
+});
+t('resolveDataFile / memFileRefs', function () {
+  var f = { 'firmware.hex': '01 02' };
+  eq(D.HDL.resolveDataFile(f, 'firmware.hex'), '01 02');
+  eq(D.HDL.resolveDataFile(f, 'rom/firmware.hex'), '01 02');
+  eq(D.HDL.resolveDataFile(f, 'missing.hex'), null);
+  eq(JSON.stringify(D.HDL.memFileRefs(ROM_SRC)), '["firmware.hex"]');
+});
+t('编译 $readmemh：存储器声明与初始化记录', function () {
+  var m = D.HDL.compile(ROM_SRC, 'verilog');
+  eq(m.ir.memories.length, 1);
+  eq(m.ir.memories[0].name, 'mem'); eq(m.ir.memories[0].bits, 8); eq(m.ir.memories[0].depth, 16);
+  eq(m.ir.memInit.length, 1);
+  eq(m.ir.memInit[0].file, 'firmware.hex'); eq(m.ir.memInit[0].radix, 16);
+  eq(JSON.stringify(m.memFiles), '["firmware.hex"]');
+  eq(m.ir.continuous[0].expr.t, 'mrd');
+});
+t('$readmemh 执行：数据文件 + @地址', function () {
+  var m = D.HDL.compile(ROM_SRC, 'verilog'), st = {};
+  var ctx = { dataFiles: { 'firmware.hex': FW } };
+  [0, 1, 7, 8, 9, 15].forEach(function (a, k) {
+    eq(D.HDL.runIR(m.ir, { addr: { v: a } }, st, {}, ctx).dout.v, [10, 20, 80, 90, 100, 160][k], 'addr=' + a);
+  });
+  ok(st.mems && st.mems.mem && st.mems.mem.length === 16, '存储器数组未建立');
+});
+t('$memreadh 别名 + initial begin/end', function () {
+  var src = 'module r(input [1:0] a, output [3:0] y); reg [3:0] m [0:3]; initial begin $memreadh("d.hex", m); end assign y = m[a]; endmodule';
+  var m = D.HDL.compile(src, 'verilog');
+  eq(m.ir.memInit[0].task, '$memreadh');
+  eq(D.HDL.runIR(m.ir, { a: { v: 2 } }, {}, {}, { dataFiles: { 'd.hex': '1 2 3 4' } }).y.v, 3);
+});
+t('$readmemb 二进制数据 + 反序声明区间', function () {
+  var src = 'module rb(input [1:0] a, output [3:0] y); reg [3:0] m [3:0]; initial $readmemb("b.mem", m); assign y = m[a]; endmodule';
+  var m = D.HDL.compile(src, 'verilog');
+  eq(m.ir.memories[0].depth, 4);
+  eq(D.HDL.runIR(m.ir, { a: { v: 1 } }, {}, {}, { dataFiles: { 'b.mem': '0001 0010 0100 1000' } }).y.v, 2);
+});
+t('缺少数据文件时报错且存储器为 0', function () {
+  var m = D.HDL.compile(ROM_SRC, 'verilog'), errs = [];
+  var r = D.HDL.runIR(m.ir, { addr: { v: 0 } }, {}, {}, { error: function (x) { errs.push(x); } });
+  eq(r.dout.v, 0);
+  ok(errs.length === 1 && /firmware\.hex/.test(errs[0]), '未报告缺失文件');
+});
+t('存储器写：mem[addr] <= data', function () {
+  var src = 'module rw(input clk, input [1:0] a, input [3:0] d, input we, output [3:0] q); reg [3:0] m [0:3]; always @(posedge clk) begin if (we) m[a] <= d; end assign q = m[a]; endmodule';
+  var m = D.HDL.compile(src, 'verilog'), st = {};
+  var f = function (c, a, d, w) { return D.HDL.runIR(m.ir, { clk: { v: c }, a: { v: a }, d: { v: d }, we: { v: w } }, st, {}, {}).q.v; };
+  eq(f(0, 1, 0, 0), 0);
+  eq(f(1, 1, 7, 1), 0, '非阻塞写在当前时间步不应被读到');
+  eq(f(0, 1, 0, 0), 7, '写入未保持');
+  eq(f(0, 2, 0, 0), 0, '其它地址被误写');
+});
+t('整机仿真：circuit.dataFiles 经 simulator 传给 HDL 元件', function () {
+  var m = D.HDL.compile(ROM_SRC, 'verilog');
+  var c = C('rom');
+  c.dataFiles = { 'firmware.hex': FW };
+  var i = add(c, 'portIn', 0, 0, { label: 'ADDR', bits: 4 });
+  var h = add(c, 'hdl', 20, 0, { name: m.name, lang: 'verilog', code: ROM_SRC, hdlPorts: m.ports, hdlIR: m.ir });
+  var p = add(c, 'probe', 40, 0, { label: 'DOUT', bits: 8 });
+  net(c, 'a', [[i, 'y'], [h, 'addr']]);
+  net(c, 'd', [[h, 'dout'], [p, 'a']]);
+  var s = sim(c);
+  eq(s.errors.length, 0, '出现仿真错误');
+  eq(s.outputValue(p), 10);
+  s.setInput(i.id, 15, false);
+  s.dirty.clear(); for (var q = 0; q < s.cs.length; q++) s.dirty.add(q);
+  s.settle();
+  eq(s.outputValue(p), 160);
+});
+t('内置 $readmemh ROM 示例与测试用例', function () {
+  var c = D.Examples.verilogRom();
+  ok(c.dataFiles && c.dataFiles['firmware.hex'], '示例未嵌入数据文件');
+  var r = D.Analysis.runTests(c, c.testText);
+  eq(r.error || (r.passed + '/' + r.total), '5/5');
+  var s = sim(c); eq(s.errors.length, 0);
+});
+t('导出 HDL 时附带数据文件内容', function () {
+  var c = D.Examples.verilogRom();
+  var v = D.HDL.exportHDL(c, 'verilog'), h = D.HDL.exportHDL(c, 'vhdl');
+  ok(/firmware\.hex/.test(v.code) && /0A 14 1E 28/.test(v.code), 'Verilog 未附数据文件');
+  ok(/firmware\.hex/.test(h.code), 'VHDL 未附数据文件');
+  ok(v.warnings.some(function (w) { return /\$readmemh/.test(w); }), '缺少外部仿真器提示');
+});
+
 console.log('\n========================================');
 console.log(pass + ' 项通过, ' + fail + ' 项失败');
 console.log('========================================\n');

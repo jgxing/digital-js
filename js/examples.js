@@ -226,6 +226,39 @@
     return b.done('输入 3 位地址点亮对应的输出 LED，EN 为使能端。');
   };
 
+  /* ---------- 11. Verilog $readmemh 数据文件 ROM ---------- */
+  E.verilogRom = function () {
+    var code = [
+      '// 16x8 ROM：用 $readmemh 从数据文件 firmware.hex 装入',
+      'module rom16 (',
+      '    input  [3:0] addr,',
+      '    output [7:0] dout',
+      ');',
+      '  reg [7:0] mem [0:15];',
+      '  initial $readmemh("firmware.hex", mem);',
+      '  assign dout = mem[addr];',
+      'endmodule'
+    ].join('\n');
+    var mod = DIG.HDL.compile(code, 'verilog');
+    var b = new Builder('Verilog $readmemh ROM');
+    b.add('portIn', 8, 20, { label: 'ADDR', bits: 4 }, { y: 'addr' });
+    b.add('hdl', 38, 20, {
+      name: mod.name, lang: 'verilog', code: code, hdlPorts: mod.ports, hdlIR: mod.ir
+    }, { addr: 'addr', dout: 'dout' });
+    b.add('probe', 70, 20, { label: 'DOUT', bits: 8, format: 'hex' }, { a: 'dout' });
+    b.add('text', 8, 50, { text: 'initial $readmemh("firmware.hex", mem)', size: 12 });
+    b.c.dataFiles = {
+      'firmware.hex': [
+        '// 16 个 8 位数据；@8 表示从第 8 个地址开始装入',
+        '0A 14 1E 28 32 3C 46 50',
+        '@8 5A 64 6E 78 82 8C 96 A0'
+      ].join('\n')
+    };
+    b.c.hdlModules.push({ name: mod.name, lang: 'verilog', code: code });
+    return b.done('演示 Verilog 的 initial $readmemh("firmware.hex", mem)。数据文件内容已嵌入本电路，可在「文件 → 数据文件」中替换、下载或删除；保存 / 另存为后仍可离线仿真。',
+      'ADDR | DOUT\n0 | 0x0A\n1 | 0x14\n7 | 0x50\n8 | 0x5A\n15 | 0xA0');
+  };
+
   E.list = [
     { id: 'halfAdder', name: '半加器', cat: '基础', make: E.halfAdder },
     { id: 'fullAdder', name: '全加器', cat: '基础', make: E.fullAdder },
@@ -236,7 +269,8 @@
     { id: 'ramDemo', name: '16×8 RAM', cat: '时序逻辑', make: E.ramDemo },
     { id: 'ic7400', name: '7400 与非门芯片', cat: '74xx', make: E.ic7400 },
     { id: 'verilogCounter', name: 'Verilog 计数器元件', cat: 'HDL', make: E.verilogCounter },
-    { id: 'vhdlAdder', name: 'VHDL 加法器元件', cat: 'HDL', make: E.vhdlAdder }
+    { id: 'vhdlAdder', name: 'VHDL 加法器元件', cat: 'HDL', make: E.vhdlAdder },
+    { id: 'verilogRom', name: 'Verilog $readmemh ROM', cat: 'HDL', make: E.verilogRom }
   ];
 
   if (typeof module !== 'undefined' && module.exports) module.exports = DIG;

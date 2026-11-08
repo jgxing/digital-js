@@ -109,6 +109,7 @@
         wires: Array.isArray(o.wires) ? o.wires : [],
         bindings: Array.isArray(o.bindings) ? o.bindings : [],
         hdlModules: Array.isArray(o.hdlModules) ? o.hdlModules : [],
+        dataFiles: (o.dataFiles && typeof o.dataFiles === 'object' && !Array.isArray(o.dataFiles)) ? o.dataFiles : {},
         testText: o.testText || ''
       };
       var max = 0;
@@ -334,6 +335,7 @@
       $('#circuit-info').innerHTML = [
         ['名称', c.name || '—'], ['元件', c.components.length], ['导线', c.wires.length],
         ['网络', s.nets.length], ['HDL 模块', (c.hdlModules || []).length],
+        ['数据文件', Object.keys(c.dataFiles || {}).length],
         ['输入', s.inputComponents().length], ['输出', s.outputComponents().length],
         ['时钟', c.components.filter(function (x) { return x.type === 'clock'; }).length]
       ].map(function (r) { return '<div class="info-row"><span>' + r[0] + '</span><b>' + U.escapeHtml(r[1]) + '</b></div>'; }).join('') +
@@ -638,10 +640,10 @@
       mask.querySelectorAll('.hdl-tabs button').forEach(function (b) { b.classList.toggle('active', b.dataset.val === lang); });
       this._hdlLang = lang;
     },
-    openHDLEditor: function (comp) {
+    openHDLEditor: function (comp, draft) {
       var self = this;
       var cur = comp && comp.props ? comp.props : null;
-      var code = cur ? cur.code : [
+      var code = draft ? draft.code : (cur ? cur.code : [
         '// 用 Verilog 描述一个自定义元件，编译后可放置到原理图中并直接参与仿真',
         'module my_module (',
         '    input  [3:0] a,',
@@ -651,14 +653,16 @@
         ');',
         '  assign y = sel ? (a + b) : (a ^ b);',
         'endmodule'
-      ].join('\n');
-      var body = '<div class="form-row"><label>模块名</label><input id="hdl-name" value="' + U.escapeHtml(cur ? cur.name : 'my_module') + '"></div>' +
-        '<div class="form-row"><label>语言</label><select id="hdl-lang-sel"><option value="verilog" ' + (!cur || cur.lang === 'verilog' ? 'selected' : '') + '>Verilog</option>' +
-        '<option value="vhdl" ' + (cur && cur.lang === 'vhdl' ? 'selected' : '') + '>VHDL</option></select>' +
-        '<button data-act="hdl-example" data-val="verilog">Verilog 示例</button><button data-act="hdl-example" data-val="vhdl">VHDL 示例</button></div>' +
+      ].join('\n'));
+      var body = '<div class="form-row"><label>模块名</label><input id="hdl-name" value="' + U.escapeHtml(draft ? draft.name : (cur ? cur.name : 'my_module')) + '"></div>' +
+        '<div class="form-row"><label>语言</label><select id="hdl-lang-sel"><option value="verilog" ' + (draft ? draft.lang === 'verilog' : (!cur || cur.lang === 'verilog') ? 'selected' : '') + '>Verilog</option>' +
+        '<option value="vhdl" ' + (draft ? draft.lang === 'vhdl' : (cur && cur.lang === 'vhdl') ? 'selected' : '') + '>VHDL</option></select>' +
+        '<button data-act="hdl-example" data-val="verilog">Verilog 示例</button><button data-act="hdl-example" data-val="vhdl">VHDL 示例</button>' +
+        '<button data-act="hdl-example" data-val="rom">ROM $readmemh</button></div>' +
         '<textarea id="hdl-src" class="code-area" spellcheck="false">' + U.escapeHtml(code) + '</textarea>' +
         '<div id="hdl-compile-result"></div>';
-      var foot = '<span class="left">支持 assign / always / case / if-else / process / rising_edge 等常用语法</span>' +
+      var foot = '<span class="left">支持 assign / always / case / process / $readmemh 等常用语法</span>' +
+        '<button data-act="hdl-data-files">📁 数据文件…</button>' +
         '<button data-act="hdl-check">✓ 编译检查</button>' +
         (comp ? '<button class="primary" data-act="hdl-update">应用到元件</button>' : '<button class="primary" data-act="hdl-create">编译并放置元件</button>') +
         (comp ? '' : '<button data-act="hdl-save-module">仅保存到元件库</button>');
@@ -693,17 +697,38 @@
         '    elsif rising_edge(clk) then', '      cnt <= std_logic_vector(unsigned(cnt) + 1);',
         '    end if;', '  end process;', '  q <= cnt;', "  hit <= '1' when cnt = d else '0';", 'end rtl;'
       ].join('\n');
+      var rom = [
+        '// 16×8 ROM：从本地数据文件 firmware.hex 装入',
+        'module rom16 (',
+        '    input  [3:0] addr,',
+        '    output [7:0] dout',
+        ');',
+        '  reg [7:0] mem [0:15];',
+        '  initial $readmemh("firmware.hex", mem);',
+        '  assign dout = mem[addr];',
+        'endmodule'
+      ].join('\n');
+      if (lang === 'rom' && !H.resolveDataFile(this.circuit.dataFiles || {}, 'firmware.hex')) {
+        this.pushUndo();
+        this.circuit.dataFiles = this.circuit.dataFiles || {};
+        this.circuit.dataFiles['firmware.hex'] = '// 16 个 8 位数据\n0A 14 1E 28 32 3C 46 50\n5A 64 6E 78 82 8C 96 A0';
+        this.log('ok', '已自动附加示例数据文件 firmware.hex（内容嵌入当前电路）');
+      }
       var mm = this._modal;
-      mm.querySelector('#hdl-src').value = lang === 'vhdl' ? h : v;
-      mm.querySelector('#hdl-lang-sel').value = lang;
-      mm.querySelector('#hdl-name').value = lang === 'vhdl' ? 'fsm_lite' : 'seq_detect';
+      mm.querySelector('#hdl-src').value = lang === 'vhdl' ? h : (lang === 'rom' ? rom : v);
+      mm.querySelector('#hdl-lang-sel').value = lang === 'vhdl' ? 'vhdl' : 'verilog';
+      mm.querySelector('#hdl-name').value = lang === 'vhdl' ? 'fsm_lite' : (lang === 'rom' ? 'rom16' : 'seq_detect');
     },
     hdlCompile: function (mm) {
       var code = mm.querySelector('#hdl-src').value, lang = mm.querySelector('#hdl-lang-sel').value;
       try {
         var mod = H.compile(code, lang);
+        var miss = this.memFileWarnings(mod);
         mm.querySelector('#hdl-compile-result').innerHTML = '<div class="ok-box">编译成功：模块 <b>' + U.escapeHtml(mod.name) + '</b>，端口 ' +
-          mod.ports.map(function (p) { return U.escapeHtml(p.name + '[' + p.dir + ',' + p.bits + 'b]'); }).join('、') + '</div>';
+          mod.ports.map(function (p) { return U.escapeHtml(p.name + '[' + p.dir + ',' + p.bits + 'b]'); }).join('、') + '</div>' +
+          (miss.length ? '<div class="err-box">该模块引用了尚未附加的数据文件：<b>' + U.escapeHtml(miss.join('、')) + '</b>。' +
+            '点 <button data-act="hdl-data-files">附加数据文件…</button> 选择本地 .hex 文件；未附加时存储器全为 0。</div>' : '') +
+          ((mod.memFiles || []).length && !miss.length ? '<div class="ok-box">存储器数据文件已就绪：' + U.escapeHtml(mod.memFiles.join('、')) + '</div>' : '');
         return mod;
       } catch (e) {
         mm.querySelector('#hdl-compile-result').innerHTML = '<div class="err-box">' + U.escapeHtml(e.message) + '</div>';
@@ -715,6 +740,8 @@
       if (!mm) return;
       var mod = this.hdlCompile(mm);
       if (!mod) return;
+      var miss = this.memFileWarnings(mod);
+      if (miss.length) this.log('warn', 'HDL 模块 ' + mod.name + ' 缺少数据文件：' + miss.join('、') + '（请在「数据文件」中附加）');
       var code = mm.querySelector('#hdl-src').value;
       var props = { name: mod.name, lang: mod.lang, code: code, hdlPorts: mod.ports, hdlIR: mod.ir };
       var comp = this._hdlEditComp;
@@ -759,7 +786,10 @@
       var lang = mm.querySelector('#imp-lang').value, mode = mm.querySelector('#imp-mode').value;
       try {
         var mod = H.compile(code, lang);
+        var miss = this.memFileWarnings(mod);
+        if (miss.length) { this._dfPending = miss.slice(); this.log('warn', '导入的模块需要数据文件：' + miss.join('、') + '，请到「文件 → 数据文件」附加'); }
         if (mode === 'gates') {
+          if (miss.length) this.log('warn', '展开为门级原理图不会保留 $readmemh 行为，请改用「作为 HDL 元件」导入');
           var g = H.importGates(mod, code);
           this.closeModal();
           this.loadCircuit(g.circuit);
@@ -818,7 +848,7 @@
         '<li><code>4,2,2</code> = 3 段（宽 4/2/2 位）；<code>1*16</code> = 16 个 1 位段（位宽*个数）；<code>4-7,0-3</code> = 直接指定所用的总线位，段顺序任意，<code>7-4</code> 为反序；三种写法可混合，最多 32 位。</li>' +
         '<li><b>输入分割必须完整且唯一</b>覆盖 0..N-1 每一位，否则属性面板会指出重复 / 遗漏的位；<b>输出分割可以重复使用位</b>，如 <code>0-7,1-6,4-7</code>。</li>' +
         '<li>总线位宽由输入分割自动推导；「总线位宽」属性作为下限，修改时会同步默认形态的分割规格。旧版 bus + b0…bN 电路仍可正常打开与仿真。</li></ul>' +
-        '<h4>快捷键</h4><p><span class="kbd">Del</span>删除 <span class="kbd">R</span>旋转 <span class="kbd">Ctrl+Z/Y</span>撤销重做 <span class="kbd">Ctrl+C/V/D</span>复制粘贴复制 <span class="kbd">Ctrl+A</span>全选 <span class="kbd">Ctrl+S</span>保存 <span class="kbd">F</span>适配 <span class="kbd">F2</span>编辑属性 <span class="kbd">+/-</span>缩放</p>' +
+        '<h4>快捷键</h4><p><span class="kbd">Del</span>删除 <span class="kbd">R</span>旋转 <span class="kbd">Ctrl+Z/Y</span>撤销重做 <span class="kbd">Ctrl+C/V/D</span>复制粘贴复制 <span class="kbd">Ctrl+A</span>全选 <span class="kbd">Ctrl+S</span>保存 <span class="kbd">Ctrl+Shift+S</span>另存为 <span class="kbd">F</span>适配 <span class="kbd">F2</span>编辑属性 <span class="kbd">+/-</span>缩放</p>' +
         '<h4>HDL 支持范围</h4><ul>' +
         '<li><b>导出</b>：整图导出为可综合的 Verilog / VHDL 结构网表；门、多路器、译码器、加法器、比较器、移位器、触发器、寄存器、计数器、RAM/ROM、74xx、HDL 元件均覆盖。</li>' +
         '<li><b>自定义元件</b>：编写 Verilog / VHDL 模块，编译成带端口的元件放到画布上，由内置 HDL 引擎直接仿真，无需 GHDL / Icarus。</li>' +
@@ -826,18 +856,212 @@
         '<li>Verilog 子集：ANSI/非 ANSI 端口、wire/reg/parameter、assign、always @(*) / @(posedge/negedge)、if/else、case、阻塞/非阻塞赋值、位选与拼接、常用运算符。</li>' +
         '<li>VHDL 子集：entity / architecture、port / signal / std_logic(_vector)、并发赋值、when-else、with-select、process、rising_edge、if/case、and/or/xor/not、算术与比较。</li>' +
         '<li>HDL 中的 <code>clock</code> 元件导出为输入时钟端口；<code>reset</code> 导出为固定电平；多语言混合时源码作为注释附在文末，需单独编译。</li></ul>' +
+        '<h4>Verilog 读取本地存储器文件</h4><ul>' +
+        '<li>标准写法 <code>initial $readmemh("firmware.hex", mem);</code>，配套声明 <code>reg [7:0] mem [0:255];</code>，用 <code>mem[addr]</code> 读、<code>mem[addr] &lt;= data;</code> 写。</li>' +
+        '<li>支持 <code>$readmemh</code>（十六进制）、<code>$readmemb</code>（二进制），并兼容别名 <code>$memreadh</code> / <code>$memreadb</code>；也支持 <code>initial begin … end</code> 与可选的起止地址参数。</li>' +
+        '<li>数据文件内容支持空白/逗号分隔、<code>//</code> 与 <code>/* */</code> 注释、<code>@8</code> 指定装入地址、<code>x/z/?</code> 未知位（按 0 处理）。</li>' +
+        '<li>浏览器不能静默读取任意本地文件，因此请点工具栏「<b>数据文件</b>」把 .hex/.mem 文件<b>附加一次</b>（可拖入、多选或粘贴文本）；内容会嵌入电路 JSON，随「保存 / 另存为」一起带走，之后离线打开仍可仿真。文件名与 HDL 中的字符串一致即可，也允许带路径。</li>' +
+        '<li>导出 Verilog 网表时会把数据文件内容作为注释附在文末，便于在 Icarus/Verilator 等工具中另存为同名文件。</li></ul>' +
         '<h4>分析与测试</h4><p>真值表由电路自动推导，用 Quine–McCluskey 算法最小化，可一键由表达式生成门级电路。测试用例首行用 <code>|</code> 分隔输入名与输出名，支持 <code>x</code> 通配符和 0x/0b 数值。</p>' +
         '</div>';
       this.modal({ title: '帮助 · 功能与快捷键', body: body, foot: '<button data-act="close-modal">关闭</button>' });
     },
 
     /* ---------- 文件 ---------- */
+    saveStats: function () {
+      var c = this.circuit;
+      return [
+        c.components.length + ' 元件', c.wires.length + ' 导线',
+        (c.hdlModules || []).length + ' HDL 模块',
+        Object.keys(c.dataFiles || {}).length + ' 数据文件',
+        (c.testText || '').split('\n').filter(function (l) { return l.trim(); }).length + ' 行测试'
+      ].join(' · ');
+    },
     saveFile: function () {
       this.circuit.testText = $('#test-editor').value;
+      this.circuit.dataFiles = this.circuit.dataFiles || {};
       U.download((this.circuit.name || 'circuit').replace(/[^\w\u4e00-\u9fa5-]/g, '_') + '.json', JSON.stringify(this.circuit, null, 2), 'application/json;charset=utf-8');
       this.status('已保存电路文件');
     },
+    saveAs: function () {
+      var c = this.circuit;
+      var base = (c.name || 'circuit').replace(/[^\w\u4e00-\u9fa5-]/g, '_');
+      var body =
+        '<div class="form-row"><label>文件名</label><input id="sa-file" value="' + U.escapeHtml(base + '.json') + '" spellcheck="false" autocomplete="off"></div>' +
+        '<div class="form-row"><label>电路名称</label><input id="sa-name" value="' + U.escapeHtml(c.name || '') + '" spellcheck="false"></div>' +
+        '<label class="chk" style="margin:2px 0 10px"><input type="checkbox" id="sa-rename"> 同时把当前编辑中的电路改成这个名称</label>' +
+        '<div class="prop-note">文件将保存到浏览器下载目录。元件、导线、HDL 模块源码、测试用例和 <b>$readmemh 数据文件</b>都会一并写入 JSON，可离线重新打开。</div>' +
+        '<div class="prop-note" style="margin-top:6px">当前电路内容：' + U.escapeHtml(this.saveStats()) + '</div>' +
+        '<div id="sa-result"></div>';
+      this.modal({
+        title: '另存为…', small: true, body: body,
+        foot: '<button data-act="close-modal">取消</button><button class="primary" data-act="do-save-as">保存文件</button>',
+        onMount: function (mm) {
+          var f = mm.querySelector('#sa-file');
+          f.focus();
+          // 只选中主文件名，方便直接改名而保留 .json 后缀
+          try { f.setSelectionRange(0, base.length); } catch (e) { }
+          f.addEventListener('keydown', function (e) { if (e.key === 'Enter') App.doSaveAs(); });
+          mm.querySelector('#sa-name').addEventListener('keydown', function (e) { if (e.key === 'Enter') App.doSaveAs(); });
+        }
+      });
+    },
+    doSaveAs: function () {
+      var mm = this._modal; if (!mm) return;
+      var fn = (mm.querySelector('#sa-file').value || '').trim();
+      var nm = (mm.querySelector('#sa-name').value || '').trim();
+      var ren = mm.querySelector('#sa-rename').checked;
+      if (!fn) { mm.querySelector('#sa-result').innerHTML = '<div class="err-box">请输入文件名</div>'; return; }
+      fn = fn.replace(/[\\/:*?"<>|]/g, '_');
+      if (!/\.json$/i.test(fn)) fn += '.json';
+      var data = U.clone(this.circuit);
+      data.testText = $('#test-editor').value;
+      data.dataFiles = data.dataFiles || {};
+      data.hdlModules = data.hdlModules || [];
+      if (nm) data.name = nm;
+      U.download(fn, JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
+      if (ren && nm && nm !== this.circuit.name) {
+        this.pushUndo();
+        this.circuit.name = nm;
+        this.showProps(); this.showCircuitInfo();
+      }
+      this.closeModal();
+      this.status('已另存为 ' + fn);
+      this.log('ok', '已另存为 ' + fn + '（' + this.saveStats() + '）');
+    },
     openFile: function () { $('#file-input').click(); },
+
+    /* ---------- 存储器数据文件（$readmemh / $readmemb） ---------- */
+    dataFileRefs: function () {
+      var refs = {};
+      (this.circuit.components || []).forEach(function (c) {
+        if (c.type === 'hdl' && c.props && c.props.code) H.memFileRefs(c.props.code).forEach(function (f) { refs[f] = (refs[f] || 0) + 1; });
+      });
+      (this.circuit.hdlModules || []).forEach(function (m) {
+        H.memFileRefs(m.code).forEach(function (f) { refs[f] = (refs[f] || 0) + 1; });
+      });
+      return refs;
+    },
+    memFileWarnings: function (mod) {
+      var files = this.circuit.dataFiles || {};
+      return (mod && mod.memFiles || []).filter(function (f) { return H.resolveDataFile(files, f) === null; });
+    },
+    openDataFiles: function (fromHDL) {
+      var self = this;
+      var body =
+        '<div class="drop-zone" id="df-drop">把本地 <b>.hex / .mem</b> 文件拖到这里，或点击下方按钮选择（可多选、可带路径名）' +
+        '<div style="margin-top:9px"><button data-act="pick-data-files" class="primary">📂 选择本地文件…</button></div></div>' +
+        '<div class="prop-note">在 Verilog 模块中写 <code>initial $readmemh("firmware.hex", mem);</code>，' +
+        '本工具会按<b>文件名</b>在此查找数据（也支持 <code>$readmemb</code> / <code>$memreadh</code> / <code>$memreadb</code>）。' +
+        '文件内容会<b>嵌入电路 JSON</b>，保存 / 另存为后随电路一起走，重新打开仍可离线仿真，不会上传到任何服务器。</div>' +
+        '<div class="form-row" style="margin-top:10px"><label>或粘贴文本</label><input id="df-name" placeholder="文件名，例如 firmware.hex" spellcheck="false"></div>' +
+        '<textarea id="df-text" class="code-area" style="height:80px" spellcheck="false" placeholder="0A 14 1E 28&#10;@8 55 AA"></textarea>' +
+        '<div style="margin:4px 0 12px"><button data-act="data-file-add-text">＋ 添加为数据文件</button></div>' +
+        '<div id="df-result"></div><div id="df-list"></div>';
+      this.modal({
+        title: '存储器数据文件 · $readmemh / $readmemb',
+        body: body,
+        foot: (fromHDL ? '<button data-act="back-to-hdl">← 返回 HDL 编辑器</button>' : '') +
+          '<span class="left">支持 16/2 进制数值、// 与 /* */ 注释、@地址、x/z 未知位</span>' +
+          '<button data-act="close-modal">关闭</button>',
+        onMount: function (mm) {
+          self._dfMask = mm;
+          self.refreshDataFiles();
+          var dz = mm.querySelector('#df-drop');
+          dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.style.borderColor = '#2563eb'; });
+          dz.addEventListener('dragleave', function () { dz.style.borderColor = ''; });
+          dz.addEventListener('drop', function (e) {
+            e.preventDefault(); dz.style.borderColor = '';
+            self.addLocalDataFiles(e.dataTransfer && e.dataTransfer.files);
+          });
+        }
+      });
+    },
+    refreshDataFiles: function () {
+      var mm = this._dfMask;
+      if (!mm || !mm.isConnected) return;
+      var files = this.circuit.dataFiles = this.circuit.dataFiles || {};
+      var keys = Object.keys(files).sort(), refs = this.dataFileRefs();
+      var html = '<div class="prop-title" style="margin:12px 0 6px">已附加 ' + keys.length + ' 个数据文件</div>';
+      if (!keys.length) html += '<div class="prop-note">尚未附加任何数据文件。</div>';
+      else {
+        html += '<table class="df-table">' + keys.map(function (k) {
+          var text = '' + files[k];
+          var used = H.resolveDataFile(files, k) !== null &&
+            Object.keys(refs).some(function (r) { return H.resolveDataFile(files, r) !== null && (r === k || r.replace(/\\/g, '/').split('/').pop().toLowerCase() === k.toLowerCase()); });
+          return '<tr><td><b>' + U.escapeHtml(k) + '</b><div class="df-prev">' + U.escapeHtml(text.replace(/\s+/g, ' ').slice(0, 52)) + '</div></td>' +
+            '<td class="df-meta">' + text.length + ' 字符<br>' + (used ? '<span style="color:var(--green)">已被 HDL 引用</span>' : '<span style="color:var(--muted)">未引用</span>') + '</td>' +
+            '<td class="df-ops"><button data-act="data-file-download" data-val="' + U.escapeHtml(k) + '">下载</button> ' +
+            '<button data-act="data-file-remove" data-val="' + U.escapeHtml(k) + '">删除</button></td></tr>';
+        }).join('') + '</table>';
+      }
+      var missing = Object.keys(refs).filter(function (r) { return H.resolveDataFile(files, r) === null; });
+      (this._dfPending || []).forEach(function (n) { if (missing.indexOf(n) < 0 && H.resolveDataFile(files, n) === null) missing.push(n); });
+      if (missing.length) html += '<div class="err-box">HDL 源码引用了尚未附加的数据文件：<b>' + U.escapeHtml(missing.join('、')) +
+        '</b><br>请点「选择本地文件」选中同名文件，或用上方文本框粘贴内容。未附加时对应存储器全为 0。</div>';
+      mm.querySelector('#df-list').innerHTML = html;
+    },
+    addLocalDataFiles: function (list) {
+      var self = this, arr = Array.prototype.slice.call(list || []);
+      if (!arr.length) return;
+      var left = arr.length, added = [];
+      arr.forEach(function (f) {
+        var rd = new FileReader();
+        rd.onload = function () {
+          self.circuit.dataFiles = self.circuit.dataFiles || {};
+          self.circuit.dataFiles[f.name] = rd.result;
+          added.push(f.name);
+          if (--left === 0) self.finishDataFiles(added);
+        };
+        rd.onerror = function () { if (--left === 0) self.finishDataFiles(added); };
+        rd.readAsText(f);
+      });
+    },
+    finishDataFiles: function (names) {
+      if (!names.length) return;
+      this._dfPending = [];
+      this.rebuild();                       // 重新建立仿真状态，让存储器重新装入数据
+      this.refreshDataFiles(); this.showCircuitInfo();
+      var mm = this._dfMask;
+      if (mm && mm.querySelector('#df-result')) mm.querySelector('#df-result').innerHTML =
+        '<div class="ok-box">已附加：' + U.escapeHtml(names.join('、')) + '。上电后 HDL 元件会重新装入。</div>';
+      this.status('已附加 ' + names.length + ' 个数据文件');
+      this.log('ok', '已附加数据文件：' + names.join('、') + '（内容已嵌入电路，可用「另存为」保存）');
+    },
+    addDataFileText: function (mm) {
+      if (!mm) return;
+      var nm = (mm.querySelector('#df-name').value || '').trim();
+      var text = mm.querySelector('#df-text').value;
+      var box = mm.querySelector('#df-result');
+      if (!nm) { box.innerHTML = '<div class="err-box">请填写文件名（要与 HDL 中 $readmemh 的字符串一致）</div>'; return; }
+      if (!text.trim()) { box.innerHTML = '<div class="err-box">请粘贴或输入数据内容</div>'; return; }
+      this.circuit.dataFiles = this.circuit.dataFiles || {};
+      this.circuit.dataFiles[nm] = text;
+      mm.querySelector('#df-text').value = '';
+      this.finishDataFiles([nm]);
+    },
+    removeDataFile: function (name) {
+      if (!this.circuit.dataFiles || !Object.prototype.hasOwnProperty.call(this.circuit.dataFiles, name)) return;
+      this.pushUndo();
+      delete this.circuit.dataFiles[name];
+      this.rebuild(); this.refreshDataFiles(); this.showCircuitInfo();
+      this.log('warn', '已移除数据文件：' + name);
+    },
+    downloadDataFile: function (name) {
+      var t = (this.circuit.dataFiles || {})[name];
+      if (t == null) return;
+      U.download(name, t, 'text/plain;charset=utf-8');
+    },
+    hdlDataFiles: function () {
+      var mm = this._modal;
+      this._hdlDraft = mm && mm.querySelector('#hdl-src') ? {
+        code: mm.querySelector('#hdl-src').value,
+        lang: mm.querySelector('#hdl-lang-sel').value,
+        name: mm.querySelector('#hdl-name').value,
+        comp: this._hdlEditComp
+      } : null;
+      this.openDataFiles(true);
+    },
     hdlMenu: function (btn) {
       var r = btn.getBoundingClientRect();
       this.menu(r.left, r.bottom + 4, [
@@ -848,6 +1072,7 @@
         { label: '↓ 直接下载 .vhd', act: 'export-vhdl' },
         { sep: true },
         { label: '＋ 编写 HDL 自定义元件', act: 'new-hdl-comp' },
+        { label: '📁 存储器数据文件 ($readmemh)…', act: 'data-files' },
         { label: '📥 导入 HDL 文件…', act: 'import-hdl' }
       ]);
     },
@@ -855,6 +1080,8 @@
       var r = btn.getBoundingClientRect();
       this.menu(r.left, r.bottom + 4, [
         { label: '💾 电路文件 (.json)', act: 'save' },
+        { label: '💾 另存为… (Ctrl+Shift+S)', act: 'save-as' },
+        { label: '📁 存储器数据文件…', act: 'data-files' },
         { label: '🖼 原理图 (.svg)', act: 'export-svg' },
         { label: '🖼 画布快照 (.png)', act: 'export-png' },
         { sep: true },
@@ -874,6 +1101,19 @@
           this.loadCircuit({ name: '未命名电路', components: [], wires: [] }); this.status('已新建空白电路'); break;
         case 'open': this.openFile(); break;
         case 'save': this.saveFile(); break;
+        case 'save-as': this.saveAs(); break;
+        case 'do-save-as': this.doSaveAs(); break;
+        case 'data-files': this.openDataFiles(false); break;
+        case 'pick-data-files': $('#data-file-input').click(); break;
+        case 'data-file-remove': this.removeDataFile(val); break;
+        case 'data-file-download': this.downloadDataFile(val); break;
+        case 'data-file-add-text': this.addDataFileText(this._modal); break;
+        case 'hdl-data-files': this.hdlDataFiles(); break;
+        case 'back-to-hdl': {
+          var d = this._hdlDraft; this.closeModal();
+          this.openHDLEditor(d && d.comp || null, d);
+          break;
+        }
         case 'export-menu': this.exportMenu($('#toolbar [data-act="export-menu"]')); break;
         case 'export-svg': U.download((this.circuit.name || 'circuit') + '.svg', R.toSVG(this.circuit, this.sim), 'image/svg+xml;charset=utf-8'); this.log('ok', '已导出 SVG'); break;
         case 'export-png': {
@@ -997,6 +1237,9 @@
           }
         };
         rd.readAsText(f); e.target.value = '';
+      });
+      $('#data-file-input').addEventListener('change', function (e) {
+        self.addLocalDataFiles(e.target.files); e.target.value = '';
       });
       window.addEventListener('beforeunload', function () { /* 无需提示，纯本地应用 */ });
     }
